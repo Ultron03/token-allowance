@@ -49,3 +49,34 @@ We will charge the Estimate when tokens are 0, because user might stop streaming
 **Consequence**
 The Estimation might not be close to real consumption and User might get over the limit.
 
+## 3. Model downgrade is feasible with a generic advisor (2026-10-10)
+
+**Context**
+A possible later feature is switching a user to a cheaper model when they are close to their budget.
+That needs an advisor to change the model name in the request, using only the shared `ChatOptions`
+interface, because the library must work with every provider.
+
+**Experiment (ModelSwitchingSpikeTest, ModelSwitchingAdvisor)**
+- The advisor copies the request with `mutate()` (options → prompt → request), sets a new model name
+  and passes the copy on. It is ordered before `ToolCallingAdvisor`.
+- Fake model with a tool call and an answer: check the model name each of the two model calls received.
+- Ollama: a normal call without the advisor works; with the advisor switching to a model that is not
+  installed, Ollama must reject it.
+- Versions: Spring AI 2.0.1, Ollama 0.20.2, `llama3.2`.
+
+**Result**
+| Question | Answer | Evidence |
+|---|---|---|
+| Can an advisor change the model through `ChatOptions` alone? | Yes | both model calls received `cheaper-model` |
+| Is the provider-specific options type kept? | Yes | the tool loop still ran twice, which only happens with `ToolCallingChatOptions` |
+| Does the provider use the new name? | Yes | Ollama answered `model 'llama3.1' not found` |
+
+**Decision**
+Model downgrade is technically possible with a generic advisor. It stays a stretch feature and is not
+part of the first release.
+
+**Consequence**
+- With Azure OpenAI, a configured deployment name takes priority over the model name, so a switch
+  would be silently ignored there. This must be documented if the feature is built.
+- The downgrade advisor must run before `ToolCallingAdvisor`, so every round of a tool loop uses the
+  cheaper model.
