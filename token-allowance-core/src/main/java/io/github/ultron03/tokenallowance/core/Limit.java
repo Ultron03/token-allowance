@@ -35,4 +35,24 @@ public record Limit(Scope scope, Window window, @Nullable Long maxTokens, @Nulla
 			throw new IllegalArgumentException("maxCost must be greater than zero");
 		}
 	}
+
+	/** {@return whether this limit is for the scope and window of {@code key}} */
+	public boolean appliesTo(BudgetKey key) {
+		return this.scope == key.scope() && this.window == key.window();
+	}
+
+	/** {@return whether {@code amount} goes over a cap; reaching a cap exactly is allowed} */
+	public boolean isExceededBy(Amount amount) {
+		boolean overTokens = this.maxTokens != null && amount.tokens() > this.maxTokens;
+		boolean overCost = this.maxCost != null && amount.cost().isGreaterThan(this.maxCost);
+		return overTokens || overCost;
+	}
+
+	/** {@return whether {@code amount} has used up a cap, so no further usage fits} */
+	public boolean isReachedBy(Amount amount) {
+		boolean tokensUsedUp = this.maxTokens != null && amount.tokens() >= this.maxTokens;
+		boolean costUsedUp = this.maxCost != null
+				&& (amount.cost().isGreaterThan(this.maxCost) || amount.cost().equals(this.maxCost));
+		return tokensUsedUp || costUsedUp;
+	}
 }

@@ -3,27 +3,30 @@ package io.github.ultron03.tokenallowance.core;
 /**
  * Tokens used by one or more model calls.
  *
- * @param input prompt tokens, including cached ones
+ * @param input all prompt tokens, including cache reads and cache writes
  * @param output completion tokens
- * @param cachedInput the part of {@code input} served from the provider's cache
+ * @param cachedInput the part of {@code input} read from the provider's cache
+ * @param cacheWriteInput the part of {@code input} written to the provider's cache
  */
-public record TokenUsage(long input, long output, long cachedInput) {
+public record TokenUsage(long input, long output, long cachedInput, long cacheWriteInput) {
 
 	/** No tokens used. */
-	public static final TokenUsage ZERO = new TokenUsage(0, 0, 0);
+	public static final TokenUsage ZERO = new TokenUsage(0, 0, 0, 0);
 
 	/**
 	 * Validates the counts.
-	 * @throws IllegalArgumentException if a count is negative or {@code cachedInput} exceeds {@code input}
+	 * @throws IllegalArgumentException if a count is negative or the cached parts exceed {@code input}
 	 */
 	public TokenUsage {
 		requireNonNegative("input", input);
 		requireNonNegative("output", output);
 		requireNonNegative("cachedInput", cachedInput);
+		requireNonNegative("cacheWriteInput", cacheWriteInput);
 
-		if (input < cachedInput) {
+		if ((input - cacheWriteInput) < cachedInput) {
 			throw new IllegalArgumentException(
-					"Cached input (" + cachedInput + ") cannot be greater than input (" + input + ")");
+					"Cached input (" + cachedInput + ") plus cache write input (" + cacheWriteInput
+							+ ") cannot be greater than input (" + input + ")");
 		}
 	}
 
@@ -46,7 +49,8 @@ public record TokenUsage(long input, long output, long cachedInput) {
 		return new TokenUsage(
 				Math.addExact(this.input, other.input),
 				Math.addExact(this.output, other.output),
-				Math.addExact(this.cachedInput, other.cachedInput));
+				Math.addExact(this.cachedInput, other.cachedInput),
+				Math.addExact(this.cacheWriteInput, other.cacheWriteInput));
 	}
 
 	/** {@return whether no tokens were reported; providers that omit usage report all zeros} */
