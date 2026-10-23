@@ -210,3 +210,49 @@ plain-Java class.
 - Teams can start in `OBSERVE`, compare the numbers with their provider dashboard, then switch to
   `ENFORCE`.
 - Every ledger implementation needs both reserve methods.
+
+## 11. Finding who a request is for (2026-10-23)
+
+**Context**
+`BudgetService` needs one id per scope, but a `ChatClient` call doesn't say who it is for.
+
+**Decision**
+- A chain of `SubjectResolver`s, asked in this order: advisor params (`SubjectParams`), then the
+  Spring Security principal, then an HTTP header. For each scope the first resolver with an id wins.
+- Spring Security and the header only give a user id. Tenant and session ids come only from advisor
+  params.
+- Blank ids count as missing and fall through to the next resolver. Anonymous Spring Security users
+  get no id, so visitors don't share one budget.
+- The header can be set by the caller to any value, so it is only for apps behind a gateway that sets
+  it. Header ids longer than 128 characters are ignored, so a client can't fill the ledger with huge
+  keys.
+- If no id is found, only `GLOBAL` limits apply.
+
+**Consequence**
+- Advisor params work everywhere, including streams, WebFlux and background jobs. Spring Security
+  and the header only work on servlet request threads.
+- A spoofed header can't get past the `GLOBAL` limit.
+
+## 12. Admission advisor runs once per request, on the caller's thread (2026-10-23)
+
+**Context**
+The budget check must run once per request, outside the tool loop (see 1), and on the thread that
+holds the Spring Security context and the HTTP request.
+
+**Decision**
+- `AdmissionAdvisor` implements `CallAdvisor` and `StreamAdvisor` directly, not `BaseAdvisor`.
+  `BaseAdvisor` runs stream logic on `Schedulers.boundedElastic()`, where the security context and
+  the request are gone. The stream chain itself runs on the subscribing thread.
+- Its order is `HIGHEST_PRECEDENCE + 100`, before chat memory (`+ 200`) and `ToolCallingAdvisor`
+  (`+ 300`), so a denied request never touches memory or tools.
+- A denial throws `BudgetExceededException`, which carries `Decision.Denied` (reason and
+  `retryAfter`). In a stream it arrives as `Flux.error`. The model is not called.
+- An admitted request gets a `RequestBudgetContext` in the advisor context: the subject ids plus
+  per-request counters for model calls and cost. `ToolCallingAdvisor` copies the context into each
+  loop round, so every model call of the request shares the same object.
+- No subject found logs one WARN, then DEBUG, so apps with only global limits aren't flooded.
+
+**Consequence**
+- WebFlux apps must pass the user id as an advisor param.
+- On a denied stream, Spring AI's `MessageAggregator` logs an `ERROR Aggregation Error` with our
+  exception. This is library behaviour and goes in the README.
