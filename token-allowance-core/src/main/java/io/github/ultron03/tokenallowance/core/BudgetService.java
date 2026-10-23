@@ -37,19 +37,34 @@ public class BudgetService {
 
 	private final ZoneId zone;
 
+	private final RequestLimit requestLimit;
+
 	private final Set<String> modelsWithoutUsage;
 
 	/**
-	 * Creates the service.
+	 * Creates the service without per-request caps.
 	 * @param limits the configured limits; at most one per scope and window
 	 * @param zone the zone windows start in
 	 * @throws IllegalArgumentException if two limits share a scope and window
 	 */
 	public BudgetService(UsageLedger ledger, PriceCatalog priceCatalog, List<Limit> limits, EnforcementMode mode,
 			Clock clock, ZoneId zone) {
+		this(ledger, priceCatalog, limits, RequestLimit.NONE, mode, clock, zone);
+	}
+
+	/**
+	 * Creates the service.
+	 * @param limits the configured limits; at most one per scope and window
+	 * @param requestLimit the caps on each single request
+	 * @param zone the zone windows start in
+	 * @throws IllegalArgumentException if two limits share a scope and window
+	 */
+	public BudgetService(UsageLedger ledger, PriceCatalog priceCatalog, List<Limit> limits, RequestLimit requestLimit,
+			EnforcementMode mode, Clock clock, ZoneId zone) {
 		Objects.requireNonNull(ledger, "ledger can't be null");
 		Objects.requireNonNull(priceCatalog, "priceCatalog can't be null");
 		Objects.requireNonNull(limits, "limits can't be null");
+		Objects.requireNonNull(requestLimit, "requestLimit can't be null");
 		Objects.requireNonNull(mode, "mode can't be null");
 		Objects.requireNonNull(clock, "clock can't be null");
 		Objects.requireNonNull(zone, "zone can't be null");
@@ -58,6 +73,7 @@ public class BudgetService {
 		this.ledger = ledger;
 		this.priceCatalog = priceCatalog;
 		this.limits = List.copyOf(limits);
+		this.requestLimit = requestLimit;
 		this.mode = mode;
 		this.clock = clock;
 		this.zone = zone;
@@ -83,6 +99,37 @@ public class BudgetService {
 				logObserved(entry.getKey());
 			}
 		}
+		return new Decision.Allowed();
+	}
+
+	/**
+	 * Checks before each model call whether the request has used up its own caps. Only finished
+	 * calls count, so a request can go over the cost cap by at most one call.
+	 * @param callsSoFar model calls this request has already made
+	 * @param costSoFar what those calls cost
+	 * @return {@link Decision.Allowed}, or {@link Decision.Denied} in enforce mode, with no wait
+	 *         because the next request starts with fresh counters
+	 */
+	public Decision checkRequest(int callsSoFar, Money costSoFar) {
+		Objects.requireNonNull(costSoFar, "costSoFar can't be null");
+		@Nullable Integer maxModelCalls = this.requestLimit.maxModelCalls();
+		@Nullable Money maxCost = this.requestLimit.maxCost();
+
+		@Nullable String reason = null;
+		if (maxModelCalls != null && callsSoFar >= maxModelCalls) {
+			reason = "request model call limit reached";
+		}
+		else if (maxCost != null && !maxCost.isGreaterThan(costSoFar)) {
+			reason = "request cost limit reached";
+		}
+
+		if (reason == null) {
+			return new Decision.Allowed();
+		}
+		if (this.mode == EnforcementMode.ENFORCE) {
+			return new Decision.Denied(reason, Duration.ZERO);
+		}
+		log.warn("Observe mode: {}, call allowed", reason);
 		return new Decision.Allowed();
 	}
 
@@ -119,18 +166,23 @@ public class BudgetService {
 	 * Charges the actual usage of a finished call. Never denied, because the call already happened.
 	 * Charges the estimate instead if the provider reported no usage.
 	 * @param model the model the call went to, used to price the usage
+	 * @return what was charged, so the caller can add it to the request's total
 	 */
-	public void settle(Reservation reservation, String model, TokenUsage actual) {
+	public Amount settle(Reservation reservation, String model, TokenUsage actual) {
 		Objects.requireNonNull(reservation, "reservation can't be null");
 		Objects.requireNonNull(model, "model can't be null");
 		Objects.requireNonNull(actual, "actual can't be null");
 
+		Amount charged;
 		if (actual.isZero()) {
 			warnUsageMissingOnce(model);
-			this.ledger.commit(reservation, reservation.amount());
-			return;
+			charged = reservation.amount();
 		}
-		this.ledger.commit(reservation, new Amount(actual.total(), costOf(model, actual)));
+		else {
+			charged = new Amount(actual.total(), costOf(model, actual));
+		}
+		this.ledger.commit(reservation, charged);
+		return charged;
 	}
 
 	/** Drops the reservation of a call that failed, without charging it. */

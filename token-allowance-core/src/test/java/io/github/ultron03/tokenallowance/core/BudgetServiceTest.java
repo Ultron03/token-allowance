@@ -361,6 +361,69 @@ class BudgetServiceTest {
 				.isInstanceOf(IllegalArgumentException.class);
 	}
 
+	@Test
+	void checkRequestAllowsBelowCaps() {
+		BudgetService service = requestCapped(EnforcementMode.ENFORCE);
+
+		assertThat(service.checkRequest(2, Money.ofDollars("0.09"))).isEqualTo(new Decision.Allowed());
+	}
+
+	@Test
+	void checkRequestDeniesWhenModelCallLimitReached() {
+		BudgetService service = requestCapped(EnforcementMode.ENFORCE);
+
+		Decision decision = service.checkRequest(3, Money.ZERO);
+
+		assertThat(decision).isEqualTo(new Decision.Denied("request model call limit reached", Duration.ZERO));
+	}
+
+	@Test
+	void checkRequestDeniesWhenCostLimitReached() {
+		BudgetService service = requestCapped(EnforcementMode.ENFORCE);
+
+		Decision decision = service.checkRequest(1, Money.ofDollars("0.10"));
+
+		assertThat(decision).isEqualTo(new Decision.Denied("request cost limit reached", Duration.ZERO));
+	}
+
+	@Test
+	void checkRequestAllowsInObserveMode() {
+		BudgetService service = requestCapped(EnforcementMode.OBSERVE);
+
+		assertThat(service.checkRequest(3, Money.ofDollars("0.10"))).isEqualTo(new Decision.Allowed());
+	}
+
+	@Test
+	void checkRequestAllowsEverythingWithoutCaps() {
+		BudgetService service = service(EnforcementMode.ENFORCE, USER_DAILY);
+
+		assertThat(service.checkRequest(1_000, Money.ofDollars("1000.00"))).isEqualTo(new Decision.Allowed());
+	}
+
+	@Test
+	void settleReturnsChargedAmount() {
+		BudgetService service = service(EnforcementMode.ENFORCE, USER_DAILY);
+		Reservation reservation = reservationOf(service.reserve(ALICE, MODEL, ESTIMATE));
+
+		Amount charged = service.settle(reservation, MODEL, new TokenUsage(400, 100, 0, 0));
+
+		assertThat(charged).isEqualTo(new Amount(500, Money.ofDollars("0.0006")));
+	}
+
+	@Test
+	void settleReturnsEstimateWhenUsageIsMissing() {
+		BudgetService service = service(EnforcementMode.ENFORCE, USER_DAILY);
+		Reservation reservation = reservationOf(service.reserve(ALICE, MODEL, ESTIMATE));
+
+		assertThat(service.settle(reservation, MODEL, TokenUsage.ZERO)).isEqualTo(ESTIMATE_AMOUNT);
+	}
+
+	private BudgetService requestCapped(EnforcementMode mode) {
+		RequestLimit requestLimit = new RequestLimit(3, Money.ofDollars("0.10"));
+		return new BudgetService(this.ledger, rejectingCatalog(), List.of(USER_DAILY), requestLimit, mode, this.clock,
+				ZoneOffset.UTC);
+	}
+
 	private BudgetService service(EnforcementMode mode, Limit... limits) {
 		return new BudgetService(this.ledger, rejectingCatalog(), List.of(limits), mode, this.clock, ZoneOffset.UTC);
 	}

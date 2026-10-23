@@ -256,3 +256,33 @@ holds the Spring Security context and the HTTP request.
 - WebFlux apps must pass the user id as an advisor param.
 - On a denied stream, Spring AI's `MessageAggregator` logs an `ERROR Aggregation Error` with our
   exception. This is library behaviour and goes in the README.
+
+## 13. Metering each model call (2026-10-23)
+
+**Context**
+Inside the tool loop every model call must be reserved, charged and, on failure, released, and a
+runaway loop must be cut off.
+
+**Decision**
+- `MeteringAdvisor` is the innermost advisor (`LOWEST_PRECEDENCE - 100`), so it runs once per model
+  call and its estimate sees the final prompt.
+- Per-request caps live in core: `RequestLimit(maxModelCalls, maxCost)` and
+  `BudgetService.checkRequest(callsSoFar, costSoFar)`. Reaching a cap denies the next call, with no
+  `retryAfter`, because the next request starts with fresh counters. Observe mode only warns.
+- The input estimate covers message text, tool-call arguments and tool results. Spring AI's
+  `Prompt.getContents()` leaves out tool results, which are often the largest input in a loop. Tool
+  schemas and images are not counted.
+- The output estimate is the request's max tokens, or 1,024 if none is set.
+- Reserve and settle use the model named in the request, not the one in the response, so settle can
+  never fail on an unknown model after the call happened. No model name means `"unknown"`, so the
+  unknown-model policy decides.
+- Provider usage is converted so `input` counts all input tokens. Anthropic's prompt tokens exclude
+  cache reads and writes, so they are added; it is recognised by its native usage class name.
+  Cache counts larger than the prompt are always added, so the conversion can't fail.
+- A failed call releases its reservation and the error is rethrown. `settle` returns what it
+  charged, and that is added to the request's cost.
+
+**Consequence**
+- A request can go over its cost cap by at most one call.
+- Bedrock's cache semantics are not verified yet (see `IDEAS.md`).
+- `MeteringAdvisor` fails fast if `AdmissionAdvisor` is not registered.
