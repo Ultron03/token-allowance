@@ -1,15 +1,20 @@
 package io.github.ultron03.tokenallowance.springai.advisor;
 
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.jspecify.annotations.Nullable;
 import org.springframework.ai.chat.client.ChatClientRequest;
 import org.springframework.ai.chat.client.ChatClientResponse;
 import org.springframework.ai.chat.client.advisor.api.CallAdvisor;
 import org.springframework.ai.chat.client.advisor.api.CallAdvisorChain;
+import org.springframework.ai.chat.client.advisor.api.StreamAdvisor;
+import org.springframework.ai.chat.client.advisor.api.StreamAdvisorChain;
 import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.core.Ordered;
+import reactor.core.publisher.Flux;
 
 import io.github.ultron03.tokenallowance.core.Amount;
 import io.github.ultron03.tokenallowance.core.BudgetService;
@@ -25,7 +30,7 @@ import io.github.ultron03.tokenallowance.springai.BudgetExceededException;
  *
  * <p>Needs {@link AdmissionAdvisor} on the same client.
  */
-public class MeteringAdvisor implements CallAdvisor {
+public class MeteringAdvisor implements CallAdvisor, StreamAdvisor {
 
 	/** Innermost, just before the model call, so the estimate sees the final prompt. */
 	public static final int ORDER = Ordered.LOWEST_PRECEDENCE - 100;
@@ -40,10 +45,20 @@ public class MeteringAdvisor implements CallAdvisor {
 
 	private final TokenEstimator tokenEstimator;
 
-	/** Creates the advisor. */
+	private final InterruptedStreamPolicy interruptedStreamPolicy;
+
+	/** Creates the advisor; interrupted streams are charged the estimate. */
 	public MeteringAdvisor(BudgetService budgetService, TokenEstimator tokenEstimator) {
+		this(budgetService, tokenEstimator, InterruptedStreamPolicy.CHARGE_ESTIMATE);
+	}
+
+	/** Creates the advisor with the given charge for interrupted streams. */
+	public MeteringAdvisor(BudgetService budgetService, TokenEstimator tokenEstimator,
+			InterruptedStreamPolicy interruptedStreamPolicy) {
 		this.budgetService = Objects.requireNonNull(budgetService, "budgetService can't be null");
 		this.tokenEstimator = Objects.requireNonNull(tokenEstimator, "tokenEstimator can't be null");
+		this.interruptedStreamPolicy = Objects.requireNonNull(interruptedStreamPolicy,
+				"interruptedStreamPolicy can't be null");
 	}
 
 	@Override
@@ -62,6 +77,39 @@ public class MeteringAdvisor implements CallAdvisor {
 	 */
 	@Override
 	public ChatClientResponse adviseCall(ChatClientRequest request, CallAdvisorChain chain) {
+		MeteredCall call = start(request);
+
+		ChatClientResponse response;
+		try {
+			response = chain.nextCall(request);
+		}
+		catch (Throwable ex) {
+			this.budgetService.release(call.reservation());
+			throw ex;
+		}
+
+		charge(call, UsageMapping.toTokenUsage(response.chatResponse()));
+		return response;
+	}
+
+	/**
+	 * Reserves on subscription, so each subscription is metered as its own model call. On complete,
+	 * charges the usage of the last chunk that reported any, or the estimate. An error before the first
+	 * chunk releases; a cancel, or an error after the first chunk, follows the {@link InterruptedStreamPolicy}.
+	 */
+	@Override
+	public Flux<ChatClientResponse> adviseStream(ChatClientRequest request, StreamAdvisorChain chain) {
+		return Flux.defer(() -> {
+			StreamMeter meter = new StreamMeter(start(request));
+			return chain.nextStream(request)
+				.doOnNext(meter::onChunk)
+				.doOnComplete(meter::onComplete)
+				.doOnError(meter::onError)
+				.doOnCancel(meter::onCancel);
+		});
+	}
+
+	private MeteredCall start(ChatClientRequest request) {
 		RequestBudgetContext context = RequestBudgetContext.from(request)
 			.orElseThrow(() -> new IllegalStateException(
 					"No request budget context: register AdmissionAdvisor on the same ChatClient"));
@@ -69,22 +117,15 @@ public class MeteringAdvisor implements CallAdvisor {
 
 		Prompt prompt = request.prompt();
 		String model = modelOf(prompt);
-		Reservation reservation = reserve(context, model, estimateOf(prompt));
+		TokenUsage estimate = estimateOf(prompt);
+		Reservation reservation = reserve(context, model, estimate);
 		context.recordModelCall();
+		return new MeteredCall(context, model, estimate, reservation);
+	}
 
-		ChatClientResponse response;
-		try {
-			response = chain.nextCall(request);
-		}
-		catch (Throwable ex) {
-			this.budgetService.release(reservation);
-			throw ex;
-		}
-
-		Amount charged = this.budgetService.settle(reservation, model,
-				UsageMapping.toTokenUsage(response.chatResponse()));
-		context.addCost(charged.cost());
-		return response;
+	private void charge(MeteredCall call, TokenUsage usage) {
+		Amount charged = this.budgetService.settle(call.reservation(), call.model(), usage);
+		call.context().addCost(charged.cost());
 	}
 
 	private Reservation reserve(RequestBudgetContext context, String model, TokenUsage estimate) {
@@ -116,6 +157,80 @@ public class MeteringAdvisor implements CallAdvisor {
 	private static void throwIfDenied(Decision decision) {
 		if (decision instanceof Decision.Denied denied) {
 			throw new BudgetExceededException(denied);
+		}
+	}
+
+	/** A model call that holds a reservation and still has to be charged or released. */
+	private record MeteredCall(RequestBudgetContext context, String model, TokenUsage estimate,
+			Reservation reservation) {
+	}
+
+	/**
+	 * Tracks one subscription to a stream and settles its reservation exactly once, because complete,
+	 * error and cancel can race. Settles in {@code doOn...} hooks rather than {@code doFinally}, so the
+	 * cost reaches the request context before the tool loop starts its next round.
+	 */
+	private final class StreamMeter {
+
+		private final MeteredCall call;
+
+		private final AtomicReference<TokenUsage> lastUsage = new AtomicReference<>(TokenUsage.ZERO);
+
+		private final AtomicBoolean anyChunk = new AtomicBoolean();
+
+		private final AtomicBoolean settled = new AtomicBoolean();
+
+		StreamMeter(MeteredCall call) {
+			this.call = call;
+		}
+
+		void onChunk(ChatClientResponse chunk) {
+			this.anyChunk.set(true);
+			TokenUsage usage = UsageMapping.toTokenUsage(chunk.chatResponse());
+			if (!usage.isZero()) {
+				this.lastUsage.set(usage);
+			}
+		}
+
+		/** A zero usage here means the provider reported none; {@code settle} then charges the estimate. */
+		void onComplete() {
+			if (claim()) {
+				charge(this.call, this.lastUsage.get());
+			}
+		}
+
+		void onError(Throwable ex) {
+			if (!this.anyChunk.get()) {
+				if (claim()) {
+					MeteringAdvisor.this.budgetService.release(this.call.reservation());
+				}
+				return;
+			}
+			onInterrupted();
+		}
+
+		void onCancel() {
+			onInterrupted();
+		}
+
+		private void onInterrupted() {
+			if (!claim()) {
+				return;
+			}
+			TokenUsage usage = this.lastUsage.get();
+			if (!usage.isZero()) {
+				charge(this.call, usage);
+				return;
+			}
+			switch (MeteringAdvisor.this.interruptedStreamPolicy) {
+				case CHARGE_ESTIMATE -> charge(this.call, this.call.estimate());
+				case RELEASE -> MeteringAdvisor.this.budgetService.release(this.call.reservation());
+			}
+		}
+
+		/** {@return true for the first caller only, who must then settle the reservation} */
+		private boolean claim() {
+			return this.settled.compareAndSet(false, true);
 		}
 	}
 }

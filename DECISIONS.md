@@ -286,3 +286,44 @@ runaway loop must be cut off.
 - A request can go over its cost cap by at most one call.
 - Bedrock's cache semantics are not verified yet (see `IDEAS.md`).
 - `MeteringAdvisor` fails fast if `AdmissionAdvisor` is not registered.
+
+## 14. Settling a streamed model call (2026-10-27)
+
+**Context**
+A stream can complete, fail or be cancelled, and providers report usage only on its last chunk, if
+at all. In the tool loop, each round is a separate stream.
+
+**Decision**
+- The reservation is made when the stream is subscribed, not when it is built.
+- On complete, the usage of the last chunk that reported any is charged, or the estimate if none did.
+- An error before the first chunk releases the reservation, like a failed blocking call.
+- A cancel, or an error after the first chunk, charges any usage already seen. Otherwise it follows
+  `InterruptedStreamPolicy`: `CHARGE_ESTIMATE` (default) or `RELEASE`.
+- The reservation is settled exactly once, because complete, error and cancel can race.
+- Settling happens in `doOnComplete`/`doOnError`/`doOnCancel`, not `doFinally`. `doFinally` runs
+  after the tool loop may already have started its next round, so the per-request cost cap would
+  miss this round's cost.
+- Anthropic's stream reports usage with a different native type (`MessageDeltaUsage`), so both types
+  are recognised when cache tokens are added to the input.
+
+**Consequence**
+- A dropped stream may be overcharged by up to its estimate, but by default it is never free.
+- Spring AI's advisor chain can be run only once, so subscribing twice to the same `stream()` result
+  fails instead of making a second, metered call.
+
+## 15. Returning 429 for a used-up budget (2026-10-27)
+
+**Context**
+A used-up budget should reach HTTP clients as "slow down and retry later", not as a server error.
+
+**Decision**
+- An optional `@RestControllerAdvice` answers `BudgetExceededException` with 429 and a
+  `ProblemDetail` whose detail is the denial reason, which holds no subject id.
+- `Retry-After` is in whole seconds, rounded up, so a client that waits that long finds the window
+  reset. It is left out when the wait is zero (a per-request cap), because the next request may
+  start at once.
+- The handler is ordered first, so an app's catch-all `@ExceptionHandler(Exception.class)` can't
+  turn the denial into a 500. Apps that want their own response turn the handler off.
+
+**Consequence**
+- Once a streamed response has started, its status can't change; the error ends the stream instead.

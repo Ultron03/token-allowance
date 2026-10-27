@@ -60,6 +60,16 @@ public record ScriptedReply(String text, List<AssistantMessage.ToolCall> toolCal
 	}
 
 	/**
+	 * A final text answer whose usage reports zero tokens, as Ollama and OpenAI-compatible streams do
+	 * when usage reporting is off (seen in Spike B).
+	 * @param text the answer text
+	 * @return the reply
+	 */
+	public static ScriptedReply answerWithZeroUsage(String text) {
+		return new ScriptedReply(text, List.of(), new DefaultUsage(0, 0));
+	}
+
+	/**
 	 * A reply asking the caller to run one tool before the model answers.
 	 * @param toolName the tool to run; must match a registered tool for tool-calling tests
 	 * @param argumentsJson the tool arguments as JSON

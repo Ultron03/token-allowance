@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 import java.util.List;
 
 import org.junit.jupiter.api.Test;
+import org.springframework.ai.chat.metadata.DefaultUsage;
 import org.springframework.ai.chat.metadata.EmptyUsage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
@@ -48,6 +49,16 @@ class FakeChatModelTest {
 		ChatResponse response = model.call(ANY_PROMPT);
 
 		assertThat(response.getMetadata().getUsage()).isInstanceOf(EmptyUsage.class);
+		assertThat(response.getMetadata().getUsage().getTotalTokens()).isZero();
+	}
+
+	@Test
+	void reportsZeroTokenDefaultUsageWhenProviderSendsZeros() {
+		FakeChatModel model = FakeChatModel.usageZero();
+
+		ChatResponse response = model.call(ANY_PROMPT);
+
+		assertThat(response.getMetadata().getUsage()).isInstanceOf(DefaultUsage.class);
 		assertThat(response.getMetadata().getUsage().getTotalTokens()).isZero();
 	}
 

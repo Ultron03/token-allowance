@@ -19,6 +19,7 @@ import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.tool.annotation.Tool;
+import reactor.core.publisher.Flux;
 
 import io.github.ultron03.tokenallowance.core.Amount;
 import io.github.ultron03.tokenallowance.core.BudgetKey;
@@ -92,13 +93,21 @@ class MeteringAdvisorTest {
 
 		client.prompt("hi").call().content();
 
-		long estimate = this.estimator.estimateInputTokens("hi") + MeteringAdvisor.DEFAULT_OUTPUT_TOKENS;
-		assertThat(this.ledger.current(ALICE_TODAY).committed().tokens()).isEqualTo(estimate);
+		assertThat(this.ledger.current(ALICE_TODAY).committed().tokens()).isEqualTo(estimateForHi());
+	}
+
+	@Test
+	void chargesEstimateWhenUsageHasZeroTokens() {
+		ChatClient client = client(FakeChatModel.usageZero(), service(RequestLimit.NONE, USER_DAILY));
+
+		client.prompt("hi").call().content();
+
+		assertThat(this.ledger.current(ALICE_TODAY).committed().tokens()).isEqualTo(estimateForHi());
 	}
 
 	@Test
 	void releasesReservationWhenModelFails() {
-		ChatClient client = client(new FailingChatModel(), service(RequestLimit.NONE, USER_DAILY));
+		ChatClient client = client(new FailingChatModel(false), service(RequestLimit.NONE, USER_DAILY));
 
 		assertThatThrownBy(() -> client.prompt("hi").call().content()).hasMessage(FailingChatModel.MESSAGE);
 
@@ -151,6 +160,125 @@ class MeteringAdvisorTest {
 	}
 
 	@Test
+	void chargesLastReportedUsageOfStream() {
+		ChatClient client = client(answering(), service(RequestLimit.NONE, USER_DAILY));
+
+		client.prompt("hi").stream().chatResponse().blockLast();
+
+		assertThat(this.ledger.current(ALICE_TODAY)).isEqualTo(new Spend(new Amount(8, new Money(11)), Amount.ZERO));
+	}
+
+	@Test
+	void chargesEstimateWhenStreamReportsNoUsage() {
+		ChatClient client = client(FakeChatModel.usageMissing(), service(RequestLimit.NONE, USER_DAILY));
+
+		client.prompt("hi").stream().chatResponse().blockLast();
+
+		assertThat(this.ledger.current(ALICE_TODAY).committed().tokens()).isEqualTo(estimateForHi());
+	}
+
+	@Test
+	void chargesEstimateWhenStreamUsageHasZeroTokens() {
+		ChatClient client = client(FakeChatModel.usageZero(), service(RequestLimit.NONE, USER_DAILY));
+
+		client.prompt("hi").stream().chatResponse().blockLast();
+
+		assertThat(this.ledger.current(ALICE_TODAY).committed().tokens()).isEqualTo(estimateForHi());
+	}
+
+	@Test
+	void releasesReservationWhenStreamFailsBeforeFirstChunk() {
+		ChatClient client = client(new FailingChatModel(false), service(RequestLimit.NONE, USER_DAILY));
+
+		assertThatThrownBy(() -> client.prompt("hi").stream().chatResponse().blockLast())
+			.hasMessage(FailingChatModel.MESSAGE);
+
+		assertThat(this.ledger.current(ALICE_TODAY)).isEqualTo(new Spend(Amount.ZERO, Amount.ZERO));
+	}
+
+	@Test
+	void chargesEstimateWhenStreamFailsAfterFirstChunk() {
+		ChatClient client = client(new FailingChatModel(true), service(RequestLimit.NONE, USER_DAILY));
+
+		assertThatThrownBy(() -> client.prompt("hi").stream().chatResponse().blockLast())
+			.hasMessage(FailingChatModel.MESSAGE);
+
+		assertThat(this.ledger.current(ALICE_TODAY).committed().tokens()).isEqualTo(estimateForHi());
+		assertThat(this.ledger.current(ALICE_TODAY).reserved()).isEqualTo(Amount.ZERO);
+	}
+
+	@Test
+	void chargesEstimateWhenStreamCancelled() {
+		ChatClient client = client(answering(), service(RequestLimit.NONE, USER_DAILY));
+
+		client.prompt("hi").stream().chatResponse().take(1).blockLast();
+
+		assertThat(this.ledger.current(ALICE_TODAY).committed().tokens()).isEqualTo(estimateForHi());
+		assertThat(this.ledger.current(ALICE_TODAY).reserved()).isEqualTo(Amount.ZERO);
+	}
+
+	@Test
+	void releasesCancelledStreamWithReleasePolicy() {
+		ChatClient client = client(answering(), service(RequestLimit.NONE, USER_DAILY),
+				InterruptedStreamPolicy.RELEASE);
+
+		client.prompt("hi").stream().chatResponse().take(1).blockLast();
+
+		assertThat(this.ledger.current(ALICE_TODAY)).isEqualTo(new Spend(Amount.ZERO, Amount.ZERO));
+	}
+
+	@Test
+	void chargesEachModelCallOfStreamedToolLoop() {
+		ChatClient client = client(FakeChatModel.toolCallThenAnswer(), service(RequestLimit.NONE, USER_DAILY));
+
+		client.prompt("What time is it?").tools(new TimeTool()).stream().chatResponse().blockLast();
+
+		long bothCalls = (120 + 15) + (160 + 40);
+		assertThat(this.ledger.current(ALICE_TODAY).committed().tokens()).isEqualTo(bothCalls);
+		assertThat(this.ledger.current(ALICE_TODAY).reserved()).isEqualTo(Amount.ZERO);
+	}
+
+	@Test
+	void deniesStreamBeforeModelCallWhenEstimateExceedsLimit() {
+		FakeChatModel model = answering();
+		ChatClient client = client(model, service(RequestLimit.NONE, SMALL_USER_DAILY));
+
+		assertThatThrownBy(() -> client.prompt("hi").stream().chatResponse().blockLast())
+			.isInstanceOf(BudgetExceededException.class);
+
+		assertThat(model.receivedPrompts()).isEmpty();
+	}
+
+	@Test
+	void cutsOffStreamedToolLoopAtMaxModelCalls() {
+		FakeChatModel model = FakeChatModel.toolCallThenAnswer();
+		ChatClient client = client(model, service(new RequestLimit(1, null), USER_DAILY));
+
+		assertThatThrownBy(
+				() -> client.prompt("What time is it?").tools(new TimeTool()).stream().chatResponse().blockLast())
+			.isInstanceOf(BudgetExceededException.class)
+			.hasMessage("request model call limit reached");
+
+		assertThat(model.receivedPrompts()).hasSize(1);
+		assertThat(this.ledger.current(ALICE_TODAY)).isEqualTo(new Spend(new Amount(120 + 15, new Money(150)),
+				Amount.ZERO));
+	}
+
+	/** The first round's cost must reach the request context before the tool loop starts the second. */
+	@Test
+	void stopsStreamedRequestWhenRequestCostReached() {
+		FakeChatModel model = FakeChatModel.toolCallThenAnswer();
+		ChatClient client = client(model, service(new RequestLimit(null, new Money(1)), USER_DAILY));
+
+		assertThatThrownBy(
+				() -> client.prompt("What time is it?").tools(new TimeTool()).stream().chatResponse().blockLast())
+			.isInstanceOf(BudgetExceededException.class)
+			.hasMessage("request cost limit reached");
+
+		assertThat(model.receivedPrompts()).hasSize(1);
+	}
+
+	@Test
 	void failsWhenAdmissionAdvisorMissing() {
 		ChatClient client = ChatClient.builder(answering())
 			.defaultAdvisors(new MeteringAdvisor(service(RequestLimit.NONE, USER_DAILY), this.estimator))
@@ -167,9 +295,17 @@ class MeteringAdvisorTest {
 	}
 
 	private ChatClient client(ChatModel model, BudgetService service) {
+		return client(model, service, InterruptedStreamPolicy.CHARGE_ESTIMATE);
+	}
+
+	private ChatClient client(ChatModel model, BudgetService service, InterruptedStreamPolicy policy) {
 		return ChatClient.builder(model)
-			.defaultAdvisors(new AdmissionAdvisor(ALICE, service), new MeteringAdvisor(service, this.estimator))
+			.defaultAdvisors(new AdmissionAdvisor(ALICE, service), new MeteringAdvisor(service, this.estimator, policy))
 			.build();
+	}
+
+	private long estimateForHi() {
+		return this.estimator.estimateInputTokens("hi") + MeteringAdvisor.DEFAULT_OUTPUT_TOKENS;
 	}
 
 	private BudgetService service(RequestLimit requestLimit, Limit... limits) {
@@ -183,14 +319,30 @@ class MeteringAdvisorTest {
 		return FakeChatModel.replying(ScriptedReply.answer("Hello there.", 5, 3));
 	}
 
-	/** A model whose provider is down: every call throws. */
+	/** A model whose provider is down: every call throws, and a stream fails before or after its first chunk. */
 	private static final class FailingChatModel implements ChatModel {
 
 		static final String MESSAGE = "provider unavailable";
 
+		private final boolean failAfterFirstChunk;
+
+		FailingChatModel(boolean failAfterFirstChunk) {
+			this.failAfterFirstChunk = failAfterFirstChunk;
+		}
+
 		@Override
 		public ChatResponse call(Prompt prompt) {
 			throw new IllegalStateException(MESSAGE);
+		}
+
+		@Override
+		public Flux<ChatResponse> stream(Prompt prompt) {
+			Flux<ChatResponse> failure = Flux.error(new IllegalStateException(MESSAGE));
+			if (!this.failAfterFirstChunk) {
+				return failure;
+			}
+			ChatResponse firstChunk = ScriptedReply.answerWithoutUsage("Hello ").toChatResponse(FakeChatModel.MODEL_NAME);
+			return Flux.concat(Flux.just(firstChunk), failure);
 		}
 
 		@Override

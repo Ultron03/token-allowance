@@ -13,6 +13,8 @@ import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 
+import com.anthropic.models.messages.MessageDeltaUsage;
+
 import io.github.ultron03.tokenallowance.core.TokenUsage;
 
 class UsageMappingTest {
@@ -30,6 +32,21 @@ class UsageMappingTest {
 		Usage usage = new DefaultUsage(100, 20, 120, nativeUsage, 300L, 50L);
 
 		assertThat(UsageMapping.toTokenUsage(responseWith(usage))).isEqualTo(new TokenUsage(450, 20, 300, 50));
+	}
+
+	@Test
+	void addsCacheTokensForAnthropicStream() {
+		MessageDeltaUsage nativeUsage = MessageDeltaUsage.builder()
+			.inputTokens(100)
+			.outputTokens(20)
+			.cacheReadInputTokens(60)
+			.cacheCreationInputTokens(10)
+			.outputTokensDetails(Optional.empty())
+			.serverToolUse(Optional.empty())
+			.build();
+		Usage usage = new DefaultUsage(100, 20, 120, nativeUsage, 60L, 10L);
+
+		assertThat(UsageMapping.toTokenUsage(responseWith(usage))).isEqualTo(new TokenUsage(170, 20, 60, 10));
 	}
 
 	@Test

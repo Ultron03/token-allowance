@@ -88,6 +88,14 @@ public final class FakeChatModel implements ChatModel {
 		return replying(ScriptedReply.answerWithoutUsage("An answer nobody counted."));
 	}
 
+	/**
+	 * One model call whose provider reports usage with zero tokens, the other "no usage" shape.
+	 * @return the model
+	 */
+	public static FakeChatModel usageZero() {
+		return replying(ScriptedReply.answerWithZeroUsage("An answer counted as nothing."));
+	}
+
 	@Override
 	public ChatResponse call(Prompt prompt) {
 		this.receivedPrompts.add(prompt);

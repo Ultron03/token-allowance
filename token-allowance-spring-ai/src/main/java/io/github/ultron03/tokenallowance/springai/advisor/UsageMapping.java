@@ -1,5 +1,7 @@
 package io.github.ultron03.tokenallowance.springai.advisor;
 
+import java.util.Set;
+
 import org.jspecify.annotations.Nullable;
 import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.model.ChatResponse;
@@ -10,12 +12,14 @@ import io.github.ultron03.tokenallowance.core.TokenUsage;
  * Turns Spring AI's {@link Usage} into a {@link TokenUsage} whose input counts all input tokens.
  *
  * <p>OpenAI-style providers include cached tokens in the prompt tokens. Anthropic does not: its
- * prompt tokens are only those after the last cache breakpoint, so the cache counts are added.
+ * prompt tokens are only those after the last cache breakpoint, so the cache counts are added. Its
+ * streams report usage with a different native type, so both types are recognised.
  */
 final class UsageMapping {
 
-	/** Anthropic's native usage type, matched by name so the SDK is not needed at runtime. */
-	static final String ANTHROPIC_USAGE_CLASS = "com.anthropic.models.messages.Usage";
+	/** Anthropic's native usage types, matched by name so the SDK is not needed at runtime. */
+	static final Set<String> ANTHROPIC_USAGE_CLASSES = Set.of("com.anthropic.models.messages.Usage",
+			"com.anthropic.models.messages.MessageDeltaUsage");
 
 	private UsageMapping() {
 	}
@@ -38,7 +42,7 @@ final class UsageMapping {
 	}
 
 	private static boolean isAnthropic(@Nullable Object nativeUsage) {
-		return nativeUsage != null && nativeUsage.getClass().getName().equals(ANTHROPIC_USAGE_CLASS);
+		return nativeUsage != null && ANTHROPIC_USAGE_CLASSES.contains(nativeUsage.getClass().getName());
 	}
 
 	private static long orZero(@Nullable Number count) {
