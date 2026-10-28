@@ -327,3 +327,33 @@ A used-up budget should reach HTTP clients as "slow down and retry later", not a
 
 **Consequence**
 - Once a streamed response has started, its status can't change; the error ends the stream instead.
+
+## 16. Configuration properties (2026-10-28)
+
+**Context**
+All settings live under `token-allowance.*`. They should be easy to write in YAML, show up in IDE
+autocomplete, and a mistake should stop the app at startup instead of letting a budget be wrong.
+
+**Decision**
+- One `@ConfigurationProperties` record, `TokenAllowanceProperties`, with nested records and
+  defaults set by `@DefaultValue`: enabled, `enforce` mode, `UTC` zone, header `X-User-Id`,
+  unknown models `reject`, interrupted streams `charge-estimate`, the 429 handler on.
+- Model prices are a list of entries with a `name`, not a map keyed by model name. Spring Boot
+  reads dots in map keys as nested properties, so keys like `gpt-4.1` or `llama3.2` would silently
+  break unless written as `"[gpt-4.1]"`.
+- Money amounts are bound as `BigDecimal` and turned into `Money` by the auto-configuration, so no
+  custom converter is needed and amounts stay exact. Enums bind straight to the core enums
+  (`allow-uncosted` becomes `ALLOW_UNCOSTED`).
+- Validation is split. Jakarta annotations check single fields (`@NotNull`, `@Positive`). Rules
+  that span fields (a limit needs a cap, `default-price` needs a default price) stay in the core
+  constructors and are not repeated.
+- Unknown models are rejected by default: an app that adds the starter without prices gets a clear
+  error instead of cost limits that quietly don't count.
+- The subject settings are named `subject`, matching `SubjectResolver`. Store settings are left
+  out until the Redis ledger exists.
+
+**Consequence**
+- Jakarta validation runs only when the app has a validator (for example
+  `spring-boot-starter-validation`). Without one, the core constructors still fail at startup, with
+  a less precise message.
+- With the default `reject`, every model in use needs a price before the first call succeeds.
