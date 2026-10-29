@@ -357,3 +357,29 @@ autocomplete, and a mistake should stop the app at startup instead of letting a 
   `spring-boot-starter-validation`). Without one, the core constructors still fail at startup, with
   a less precise message.
 - With the default `reject`, every model in use needs a price before the first call succeeds.
+
+## 17. Auto-configuration (2026-10-29)
+
+**Context**
+Adding the starter should be enough: the budget service, the advisors and the 429 handler are
+built from `token-allowance.*`, and every `ChatClient` the app gets from Spring AI is metered.
+Users must still be able to replace any part.
+
+**Decision**
+- The advisors are added through a `ChatClientBuilderCustomizer` bean. Spring AI 2.0 deprecated
+  `ChatClientCustomizer` for removal, and applies every customizer bean to each `ChatClient.Builder`
+  it creates.
+- Every bean is `@ConditionalOnMissingBean`, so an app's own bean of the same type wins. The
+  customizer is matched by name instead, since apps often have customizers for other reasons.
+- The subject resolver chain is one bean. Spring Security and the header resolver are added only
+  when their classes are present. Separate resolver beans would clash with the chain, which is a
+  resolver itself.
+- The 429 handler lives in a nested configuration that needs a web application and can be turned
+  off with `token-allowance.web.exception-handler=false`, so non-web apps never load web types.
+- Prices that look like per-token prices are caught at startup: more than 6 decimals fails with a
+  message saying prices are per million tokens, and a non-zero price below 0.001 logs a warning.
+
+**Consequence**
+- A `ChatClient` built by hand with `ChatClient.builder(..)` is not metered unless the app adds the
+  two advisor beans itself.
+- Turning a part off means defining a replacement bean; there are no per-bean switches.
