@@ -2,7 +2,6 @@
 
 A Spring Boot starter that enforces per-user, per-tenant and per-session token and dollar budgets on Spring AI `ChatClient` calls. It also caps runaway tool loops, so one request can't make a hundred model calls.
 
-Version 0.1.0 is not on Maven Central yet.
 
 ## Why
 
