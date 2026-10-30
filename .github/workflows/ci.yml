@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      # The release profile also builds the javadoc, so broken Javadoc fails here and not on release day.
+      - name: Build and test
+        run: ./mvnw -B -ntp verify -Prelease -Dgpg.skip

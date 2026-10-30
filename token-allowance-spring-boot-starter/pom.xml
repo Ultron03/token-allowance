@@ -11,10 +11,55 @@
   </parent>
 
   <artifactId>token-allowance-spring-boot-starter</artifactId>
+  <name>Token Allowance Spring Boot Starter</name>
+  <description>Add this one dependency to enforce token and cost budgets on Spring AI ChatClient calls.</description>
+
   <dependencies>
+      <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter</artifactId>
+      </dependency>
       <dependency>
             <groupId>io.github.ultron03</groupId>
             <artifactId>token-allowance-autoconfigure</artifactId>
       </dependency>
   </dependencies>
+
+  <profiles>
+      <profile>
+            <!-- The starter has no code, but Maven Central requires sources and javadoc jars for every jar. -->
+            <id>release</id>
+            <build>
+                  <plugins>
+                        <plugin>
+                              <groupId>org.apache.maven.plugins</groupId>
+                              <artifactId>maven-jar-plugin</artifactId>
+                              <version>3.5.1</version>
+                              <executions>
+                                    <execution>
+                                          <id>empty-sources-jar</id>
+                                          <phase>package</phase>
+                                          <goals>
+                                                <goal>jar</goal>
+                                          </goals>
+                                          <configuration>
+                                                <classifier>sources</classifier>
+                                          </configuration>
+                                    </execution>
+                                    <execution>
+                                          <id>empty-javadoc-jar</id>
+                                          <phase>package</phase>
+                                          <goals>
+                                                <goal>jar</goal>
+                                          </goals>
+                                          <configuration>
+                                                <classifier>javadoc</classifier>
+                                          </configuration>
+                                    </execution>
+                              </executions>
+                        </plugin>
+                  </plugins>
+            </build>
+      </profile>
+  </profiles>
 </project>

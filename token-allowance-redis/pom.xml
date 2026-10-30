@@ -11,6 +11,8 @@
   </parent>
 
   <artifactId>token-allowance-redis</artifactId>
+  <name>Token Allowance Redis</name>
+  <description>Redis usage ledger for budgets shared across instances.</description>
   <dependencies>
       <dependency>
             <groupId>io.github.ultron03</groupId>

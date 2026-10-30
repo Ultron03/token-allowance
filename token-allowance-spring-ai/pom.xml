@@ -11,6 +11,8 @@
   </parent>
 
   <artifactId>token-allowance-spring-ai</artifactId>
+  <name>Token Allowance Spring AI</name>
+  <description>Spring AI advisors that admit, meter and charge ChatClient calls.</description>
   <dependencies>
     <dependency>
         <groupId>io.github.ultron03</groupId>

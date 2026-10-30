@@ -11,6 +11,8 @@
 	</parent>
 
 	<artifactId>token-allowance-core</artifactId>
+	<name>Token Allowance Core</name>
+	<description>Budget rules, pricing and usage ledger in plain Java, with no Spring dependency.</description>
 
 	<dependencies>
 		<dependency>

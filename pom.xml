@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd"
+	child.project.url.inherit.append.path="false">
 	<modelVersion>4.0.0</modelVersion>
 	<groupId>io.github.ultron03</groupId>
 	<artifactId>token-allowance-parent</artifactId>
@@ -13,20 +14,29 @@
 		<module>token-allowance-spring-ai</module>
 		<module>token-allowance-spring-boot-starter</module>
 	</modules>
-	<name/>
-	<description/>
-	<url/>
+	<name>Token Allowance Parent</name>
+	<description>Token and cost budgets for Spring AI calls.</description>
+	<url>https://github.com/Ultron03/token-allowance</url>
 	<licenses>
-		<license/>
+		<license>
+			<name>Apache License, Version 2.0</name>
+			<url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+			<distribution>repo</distribution>
+		</license>
 	</licenses>
 	<developers>
-		<developer/>
+		<developer>
+			<id>Ultron03</id>
+			<name>Ultron03</name>
+			<url>https://github.com/Ultron03</url>
+		</developer>
 	</developers>
-	<scm>
-		<connection/>
-		<developerConnection/>
-		<tag/>
-		<url/>
+	<scm child.scm.connection.inherit.append.path="false" child.scm.developerConnection.inherit.append.path="false"
+		child.scm.url.inherit.append.path="false">
+		<connection>scm:git:https://github.com/Ultron03/token-allowance.git</connection>
+		<developerConnection>scm:git:ssh://git@github.com/Ultron03/token-allowance.git</developerConnection>
+		<tag>HEAD</tag>
+		<url>https://github.com/Ultron03/token-allowance</url>
 	</scm>
 	<properties>
 		<maven.compiler.release>17</maven.compiler.release>
@@ -75,6 +85,72 @@
 				<version>${project.version}</version>
 			</dependency>
 		</dependencies>
-  	</dependencyManagement>
+	</dependencyManagement>
+
+	<profiles>
+		<profile>
+			<!-- Builds sources and javadoc jars, signs everything and uploads it to Maven Central. -->
+			<id>release</id>
+			<build>
+				<plugins>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-source-plugin</artifactId>
+						<version>3.4.0</version>
+						<executions>
+							<execution>
+								<id>attach-sources</id>
+								<goals>
+									<goal>jar-no-fork</goal>
+								</goals>
+							</execution>
+						</executions>
+					</plugin>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-javadoc-plugin</artifactId>
+						<version>3.12.0</version>
+						<executions>
+							<execution>
+								<id>attach-javadocs</id>
+								<goals>
+									<goal>jar</goal>
+								</goals>
+							</execution>
+						</executions>
+					</plugin>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-gpg-plugin</artifactId>
+						<version>3.2.8</version>
+						<executions>
+							<execution>
+								<id>sign-artifacts</id>
+								<phase>verify</phase>
+								<goals>
+									<goal>sign</goal>
+								</goals>
+							</execution>
+						</executions>
+					</plugin>
+					<plugin>
+						<groupId>org.sonatype.central</groupId>
+						<artifactId>central-publishing-maven-plugin</artifactId>
+						<version>0.12.0</version>
+						<extensions>true</extensions>
+						<configuration>
+							<publishingServerId>central</publishingServerId>
+							<!-- Upload and validate only; the release is published by hand in the Central Portal. -->
+							<autoPublish>false</autoPublish>
+							<excludeArtifacts>
+								<!-- Empty until the Redis ledger is written. -->
+								<artifact>token-allowance-redis</artifact>
+							</excludeArtifacts>
+						</configuration>
+					</plugin>
+				</plugins>
+			</build>
+		</profile>
+	</profiles>
 
 </project>
