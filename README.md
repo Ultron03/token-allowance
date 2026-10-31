@@ -34,7 +34,7 @@ Reserving before the call means two parallel requests can't both pass a check an
 <dependency>
     <groupId>io.github.ultron03</groupId>
     <artifactId>token-allowance-spring-boot-starter</artifactId>
-    <version>0.1.0</version>
+    <version>0.1.1</version>
 </dependency>
 <dependency>
     <groupId>org.springframework.ai</groupId>

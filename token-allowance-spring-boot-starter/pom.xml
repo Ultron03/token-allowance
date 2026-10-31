@@ -20,6 +20,11 @@
             <artifactId>spring-boot-starter</artifactId>
       </dependency>
       <dependency>
+            <!-- The properties are @Validated, and Boot fails at startup when the validation API is present without an implementation. -->
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+      </dependency>
+      <dependency>
             <groupId>io.github.ultron03</groupId>
             <artifactId>token-allowance-autoconfigure</artifactId>
       </dependency>

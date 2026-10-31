@@ -383,3 +383,19 @@ Users must still be able to replace any part.
 - A `ChatClient` built by hand with `ChatClient.builder(..)` is not metered unless the app adds the
   two advisor beans itself.
 - Turning a part off means defining a replacement bean; there are no per-bean switches.
+
+## 18. The starter brings a validator (2026-10-31)
+
+**Context**
+Building a demo app on 0.1.0 showed that an app with only webmvc, a model starter and Token
+Allowance fails at startup with `NoProviderFoundException`. The properties are `@Validated`, the
+autoconfigure module brings the Jakarta Validation API, and Boot validates whenever the API is
+present, so it needs an implementation that nothing provided.
+
+**Decision**
+- The starter depends on `spring-boot-starter-validation`, so adding the starter is still enough.
+- Validation stays on. Making the API optional instead would let a wrong setting through silently.
+
+**Consequence**
+- Hibernate Validator is on the classpath of every app that uses the starter.
+- Fixed in 0.1.1; 0.1.0 needs `spring-boot-starter-validation` added by hand.
