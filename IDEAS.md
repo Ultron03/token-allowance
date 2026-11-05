@@ -7,3 +7,5 @@ Possible features after v0.1. Not planned yet.
 - **Cache-write duration.** Anthropic charges 1.25x input for 5-minute cache writes and 2x for 1-hour writes. v0.1 has one cache-write price per model.
 - **Bedrock cache tokens.** Bedrock Converse probably reports input tokens without cache reads and writes, like Anthropic. Verify, then add its usage type to the cache-excluded rule in `UsageMapping`.
 - **Configurable output estimate.** Calls without max tokens reserve 1,024 output tokens. Make this a setting if it turns out too high or too low.
+- **Reclaim reservations of a crashed instance.** If an app instance stops between reserve and settle, its estimate stays reserved in Redis until the window's key expires. A lease index with a sweep in the reserve script could give it back sooner.
+- **Local fallback while Redis is down.** A third failure mode next to fail-open and fail-closed: switch to the in-memory ledger during the outage. Each instance then enforces the limit on its own (N instances let up to N times the limit through), and spend counted locally is not written back to Redis afterwards.

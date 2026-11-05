@@ -399,3 +399,30 @@ present, so it needs an implementation that nothing provided.
 **Consequence**
 - Hibernate Validator is on the classpath of every app that uses the starter.
 - Fixed in 0.1.1; 0.1.0 needs `spring-boot-starter-validation` added by hand.
+
+## 19. Redis key schema (2026-10-31)
+
+**Context**
+The Redis ledger must keep the same counters as the in-memory one, shared by every instance of an
+app. One reserve changes several budgets at once (user, tenant, global), so a Lua script has to
+reach all of their keys, also on Redis Cluster.
+
+**Decision**
+- Every key starts with the hash tag `{ta}`, so all keys share one Cluster slot and one script can
+  touch them.
+- A budget is a hash at `{ta}:budget:{scope}:{window}:{windowStartEpochSeconds}:{subject}` with the
+  fields `committed_tokens`, `committed_micros`, `reserved_tokens` and `reserved_micros`. A missing
+  field is 0. The subject goes last because only it may contain `:` or `{`.
+- A budget key expires one day after its window ends, so a call that spans the window end can still
+  settle. Java computes the time, since Redis doesn't know the configured zone, and every script
+  that writes a budget key sets the expiry again.
+- An open reservation is a key `{ta}:reservation:{id}` that lives one day. Settling deletes it and
+  changes the counters only if the delete removed something, so settling twice is a no-op. The
+  amount and keys come from the `Reservation` the caller passes in.
+- Time comes from the app's `Clock`, not from Redis.
+
+**Consequence**
+- On Cluster, all budget keys live on one node.
+- If an instance stops between reserve and settle, its estimate stays reserved until the budget key
+  expires. Reclaiming it is in `IDEAS.md`.
+- A call that settles more than a day after it reserved is not charged.
