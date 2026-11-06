@@ -152,9 +152,46 @@ All properties start with `token-allowance.`. Amounts are in dollars; write them
 | `per-request.max-model-calls` | none | Most model calls one request may make, tool-loop rounds included. |
 | `per-request.max-cost` | none | Most dollars one request may cost. |
 | `stream.interrupted` | `charge-estimate` | A stream that stops before the provider reports usage: `charge-estimate` charges the estimate, `release` charges nothing. |
-| `web.exception-handler` | `true` | Answers a used-up budget with 429. Turn it off to handle `BudgetExceededException` yourself. |
+| `web.exception-handler` | `true` | Answers a used-up budget with 429 and an unreachable budget store with 503. Turn it off to handle `BudgetExceededException` and `LedgerUnavailableException` yourself. |
+| `store.type` | `in-memory` | `in-memory` keeps spend in each instance; `redis` shares it across instances (see below). |
+| `store.failure-mode` | `auto` | What happens to new calls while Redis can't be reached: `fail-open`, `fail-closed`, or `auto` (open in `observe` mode, closed in `enforce` mode). |
 
 The app fails at startup on an invalid setting, such as a price with more than six decimal places. That is almost always a per-token price where a per-million price was meant.
+
+## Sharing budgets across instances
+
+From 0.2.0, spend can be kept in Redis, so every instance of your app counts against the same budgets. Add the Redis module and Spring Boot's Redis starter:
+
+```xml
+<dependency>
+    <groupId>io.github.ultron03</groupId>
+    <artifactId>token-allowance-redis</artifactId>
+    <version>0.2.0</version>
+</dependency>
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-data-redis</artifactId>
+</dependency>
+```
+
+```yaml
+spring:
+  data:
+    redis:
+      host: localhost
+      timeout: 500ms     # the default is 60 seconds per command
+token-allowance:
+  store:
+    type: redis
+```
+
+Each reserve and settle is one Lua script, so parallel calls on different instances can't overspend together. All keys share the hash tag `{ta}`, so on Redis Cluster they live on one node.
+
+**When Redis is down.** With `fail-closed`, new calls get `503 Service Unavailable`. With `fail-open`, they go ahead without budget checks, and their spend is not recorded, not even after Redis is back. Calls already running finish either way; their charge is lost and logged. The outage is logged once at WARN when it starts and at INFO when Redis is back.
+
+Set `spring.data.redis.timeout`. Without it, every call waits up to 60 seconds for Redis before the failure mode applies.
+
+With Spring Boot Actuator, Boot's own `redis` health indicator turns `/actuator/health` DOWN while Redis is unreachable, also in `fail-open` mode, where the app still serves calls. The Kubernetes liveness and readiness groups don't include it by default; leave it out of them if you fail open.
 
 ## Replacing parts
 
@@ -164,7 +201,7 @@ Every bean steps aside when your app defines one of the same type:
 |---|---|
 | `TokenEstimator` | Count tokens exactly with your model's tokenizer. |
 | `PriceCatalog` | Load prices from somewhere other than properties. |
-| `UsageLedger` | Store spend somewhere other than memory. |
+| `UsageLedger` | Store spend somewhere other than memory or Redis. Throw `LedgerUnavailableException` when your store can't be reached, so the failure mode applies. |
 | `SubjectResolver` | Find the user, tenant or session your own way. |
 | `Clock` | Control time in tests. |
 
@@ -182,7 +219,8 @@ ChatClient chatClient = ChatClient.builder(chatModel)
 
 - **Costs are estimates, not invoices.** They use the prices you configure and the usage the provider reports. Check them against your provider's bill.
 - **A budget can be exceeded a little.** Each call reserves an estimate first and is charged its real usage afterwards; the call has already happened, so that charge is never refused. With several calls in flight, a budget can go over by the difference between their estimates and their real usage. A request can go over its own `per-request.max-cost` by at most one call.
-- **Spend is kept in memory.** In 0.1 it is lost on restart, and each instance of your app has its own budgets.
+- **In-memory spend is per instance.** With the default `store.type`, spend is lost on restart and each instance of your app has its own budgets. Use Redis to share them.
+- **A crashed instance leaves its estimates reserved.** If an instance stops between reserving and settling a call, that estimate stays counted in Redis until the budget's window ends.
 - **The pre-call token estimate is approximate.** The default estimator assumes one token per three characters, rounded up. For English and most code this is higher than the real count, which is the safe direction. For Chinese, Japanese and Korean text it can be about three times too low. Tool schemas and images are not counted. The output estimate is the request's max tokens, or 1,024 if none is set. After the call, the provider's token count replaces the estimate; the estimate is charged only when the provider reports no usage.
 - **A denied stream logs an ERROR line.** When a budget denies a streamed call, Spring AI's `MessageAggregator` logs `Aggregation Error` with the `BudgetExceededException`, even when your app handles the exception. The log line comes from Spring AI and can be ignored.
 - **A stream can be subscribed only once.** Spring AI runs its advisor chain once per `stream()` call. Subscribing twice to the same result fails instead of making a second call; call `stream()` again for a new request.

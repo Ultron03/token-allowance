@@ -1,6 +1,7 @@
 package io.github.ultron03.tokenallowance.core;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Duration;
@@ -10,6 +11,7 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -418,10 +420,74 @@ class BudgetServiceTest {
 		assertThat(service.settle(reservation, MODEL, TokenUsage.ZERO)).isEqualTo(ESTIMATE_AMOUNT);
 	}
 
+	@Test
+	void admitsWhenLedgerUnavailableAndFailOpen() {
+		BudgetService service = unavailable(LedgerFailureMode.FAIL_OPEN);
+
+		assertThat(service.admit(ALICE)).isEqualTo(new Decision.Allowed());
+	}
+
+	@Test
+	void admitThrowsWhenLedgerUnavailableAndFailClosed() {
+		BudgetService service = unavailable(LedgerFailureMode.FAIL_CLOSED);
+
+		assertThatThrownBy(() -> service.admit(ALICE)).isInstanceOf(LedgerUnavailableException.class);
+	}
+
+	@Test
+	void reservesUntrackedEstimateWhenLedgerUnavailableAndFailOpen() {
+		BudgetService service = unavailable(LedgerFailureMode.FAIL_OPEN);
+
+		Reservation reservation = reservationOf(service.reserve(ALICE, MODEL, ESTIMATE));
+
+		assertThat(reservation.amount()).isEqualTo(ESTIMATE_AMOUNT);
+		assertThat(reservation.keys()).containsExactly(ALICE_TODAY);
+	}
+
+	@Test
+	void reserveThrowsWhenLedgerUnavailableAndFailClosed() {
+		BudgetService service = unavailable(LedgerFailureMode.FAIL_CLOSED);
+
+		assertThatThrownBy(() -> service.reserve(ALICE, MODEL, ESTIMATE))
+			.isInstanceOf(LedgerUnavailableException.class);
+	}
+
+	@Test
+	void rejectsUnknownModelEvenWhenLedgerUnavailable() {
+		BudgetService service = unavailable(LedgerFailureMode.FAIL_OPEN);
+
+		assertThatThrownBy(() -> service.reserve(ALICE, "other-model", ESTIMATE))
+			.isInstanceOf(UnknownModelException.class);
+	}
+
+	@Test
+	void settleReturnsChargeWhenLedgerUnavailable() {
+		BudgetService service = unavailable(LedgerFailureMode.FAIL_CLOSED);
+		Reservation reservation = new Reservation("r1", Set.of(ALICE_TODAY), ESTIMATE_AMOUNT);
+
+		Amount charged = service.settle(reservation, MODEL, new TokenUsage(800, 200, 0, 0));
+
+		assertThat(charged).isEqualTo(new Amount(1000, new Money(1200)));
+	}
+
+	@Test
+	void releaseDoesNotThrowWhenLedgerUnavailable() {
+		BudgetService service = unavailable(LedgerFailureMode.FAIL_CLOSED);
+		Reservation reservation = new Reservation("r1", Set.of(ALICE_TODAY), ESTIMATE_AMOUNT);
+
+		assertThatCode(() -> service.release(reservation)).doesNotThrowAnyException();
+	}
+
 	private BudgetService requestCapped(EnforcementMode mode) {
 		RequestLimit requestLimit = new RequestLimit(3, Money.ofDollars("0.10"));
-		return new BudgetService(this.ledger, rejectingCatalog(), List.of(USER_DAILY), requestLimit, mode, this.clock,
-				ZoneOffset.UTC);
+		return new BudgetService(this.ledger, rejectingCatalog(), List.of(USER_DAILY), requestLimit, mode,
+				LedgerFailureMode.defaultFor(mode), this.clock, ZoneOffset.UTC);
+	}
+
+	/** Enforce mode on a ledger that is always down, so only the failure mode decides. */
+	private BudgetService unavailable(LedgerFailureMode failureMode) {
+		return new BudgetService(new UnavailableLedger(), rejectingCatalog(), List.of(USER_DAILY), RequestLimit.NONE,
+				EnforcementMode.ENFORCE, failureMode, this.clock, ZoneOffset.UTC);
 	}
 
 	private BudgetService service(EnforcementMode mode, Limit... limits) {
@@ -435,5 +501,37 @@ class BudgetServiceTest {
 	private static Reservation reservationOf(Decision decision) {
 		assertThat(decision).isInstanceOf(Decision.Reserved.class);
 		return ((Decision.Reserved) decision).reservation();
+	}
+
+	private static final class UnavailableLedger implements UsageLedger {
+
+		@Override
+		public ReservationResult reserve(Map<BudgetKey, Limit> limits, Amount estimate) {
+			throw down();
+		}
+
+		@Override
+		public Reservation reserveUnchecked(Set<BudgetKey> keys, Amount estimate) {
+			throw down();
+		}
+
+		@Override
+		public void commit(Reservation reservation, Amount actual) {
+			throw down();
+		}
+
+		@Override
+		public void release(Reservation reservation) {
+			throw down();
+		}
+
+		@Override
+		public Spend current(BudgetKey key) {
+			throw down();
+		}
+
+		private static LedgerUnavailableException down() {
+			return new LedgerUnavailableException("store down", new IllegalStateException("connection refused"));
+		}
 	}
 }

@@ -14,6 +14,9 @@ import io.github.ultron03.tokenallowance.autoconfigure.TokenAllowanceProperties.
 import io.github.ultron03.tokenallowance.autoconfigure.TokenAllowanceProperties.ModelProperties;
 import io.github.ultron03.tokenallowance.autoconfigure.TokenAllowanceProperties.PerRequest;
 import io.github.ultron03.tokenallowance.autoconfigure.TokenAllowanceProperties.Pricing;
+import io.github.ultron03.tokenallowance.autoconfigure.TokenAllowanceProperties.StoreFailureMode;
+import io.github.ultron03.tokenallowance.core.EnforcementMode;
+import io.github.ultron03.tokenallowance.core.LedgerFailureMode;
 import io.github.ultron03.tokenallowance.core.Limit;
 import io.github.ultron03.tokenallowance.core.ModelPrice;
 import io.github.ultron03.tokenallowance.core.Money;
@@ -83,6 +86,15 @@ final class PropertyMapping {
 	/** Returns the caps on one request; unset caps don't apply. */
 	static RequestLimit requestLimit(PerRequest perRequest) {
 		return new RequestLimit(perRequest.maxModelCalls(), moneyOrNull(perRequest.maxCost()));
+	}
+
+	/** Returns the configured failure mode; {@code auto} follows the enforcement mode. */
+	static LedgerFailureMode failureMode(StoreFailureMode failureMode, EnforcementMode mode) {
+		return switch (failureMode) {
+			case AUTO -> LedgerFailureMode.defaultFor(mode);
+			case FAIL_OPEN -> LedgerFailureMode.FAIL_OPEN;
+			case FAIL_CLOSED -> LedgerFailureMode.FAIL_CLOSED;
+		};
 	}
 
 	private static ModelPrice modelPrice(String model, BigDecimal input, BigDecimal output,

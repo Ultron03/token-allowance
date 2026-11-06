@@ -12,11 +12,14 @@ import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.dao.QueryTimeoutException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.RedisScript;
 
 import io.github.ultron03.tokenallowance.core.Amount;
 import io.github.ultron03.tokenallowance.core.BudgetKey;
+import io.github.ultron03.tokenallowance.core.LedgerUnavailableException;
 import io.github.ultron03.tokenallowance.core.Limit;
 import io.github.ultron03.tokenallowance.core.Money;
 import io.github.ultron03.tokenallowance.core.Reservation;
@@ -27,6 +30,9 @@ import io.github.ultron03.tokenallowance.core.UsageLedger;
 /**
  * Usage ledger kept in Redis, so every instance of an app shares the same budgets. Each change runs
  * as one Lua script, which Redis executes without any other command in between.
+ *
+ * <p>A refused connection or a command timeout becomes {@link LedgerUnavailableException}; other
+ * Redis errors, such as a failing script, are bugs and pass through unchanged.
  */
 public final class RedisUsageLedger implements UsageLedger {
 
@@ -43,6 +49,8 @@ public final class RedisUsageLedger implements UsageLedger {
 	private static final long RESERVED = 0;
 
 	private static final String NO_CAP = "-1";
+
+	private static final String UNAVAILABLE = "Redis is unavailable";
 
 	private final StringRedisTemplate redis;
 
@@ -95,9 +103,15 @@ public final class RedisUsageLedger implements UsageLedger {
 	@Override
 	public Spend current(BudgetKey key) {
 		Objects.requireNonNull(key, "key can't be null");
-		List<String> values = this.redis.<String, String>opsForHash()
-			.multiGet(RedisKeys.budget(key), List.of(RedisKeys.COMMITTED_TOKENS, RedisKeys.COMMITTED_MICROS,
-					RedisKeys.RESERVED_TOKENS, RedisKeys.RESERVED_MICROS));
+		List<String> values;
+		try {
+			values = this.redis.<String, String>opsForHash()
+				.multiGet(RedisKeys.budget(key), List.of(RedisKeys.COMMITTED_TOKENS, RedisKeys.COMMITTED_MICROS,
+						RedisKeys.RESERVED_TOKENS, RedisKeys.RESERVED_MICROS));
+		}
+		catch (DataAccessResourceFailureException | QueryTimeoutException ex) {
+			throw new LedgerUnavailableException(UNAVAILABLE, ex);
+		}
 		return new Spend(amount(values.get(0), values.get(1)), amount(values.get(2), values.get(3)));
 	}
 
@@ -128,9 +142,14 @@ public final class RedisUsageLedger implements UsageLedger {
 			args.add(expiryOf(key));
 		}
 
-		// execute only returns null inside a pipeline or transaction, which this class never opens.
-		return Objects.requireNonNull(this.redis.execute(RESERVE, redisKeys, args.toArray()),
-				"reserve script returned no result");
+		try {
+			// execute only returns null inside a pipeline or transaction, which this class never opens.
+			return Objects.requireNonNull(this.redis.execute(RESERVE, redisKeys, args.toArray()),
+					"reserve script returned no result");
+		}
+		catch (DataAccessResourceFailureException | QueryTimeoutException ex) {
+			throw new LedgerUnavailableException(UNAVAILABLE, ex);
+		}
 	}
 
 	private static String maxTokensOf(@Nullable Limit limit) {
@@ -160,7 +179,13 @@ public final class RedisUsageLedger implements UsageLedger {
 			args.add(expiryOf(key));
 		}
 
-		Long settled = this.redis.execute(SETTLE, keys, args.toArray());
+		Long settled;
+		try {
+			settled = this.redis.execute(SETTLE, keys, args.toArray());
+		}
+		catch (DataAccessResourceFailureException | QueryTimeoutException ex) {
+			throw new LedgerUnavailableException(UNAVAILABLE, ex);
+		}
 		if (settled == null || settled == NOT_SETTLED) {
 			log.debug("Reservation {} was already settled or has expired", reservation.id());
 		}

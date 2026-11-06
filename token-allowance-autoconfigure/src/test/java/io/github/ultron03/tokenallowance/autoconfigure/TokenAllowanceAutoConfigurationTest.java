@@ -1,9 +1,12 @@
 package io.github.ultron03.tokenallowance.autoconfigure;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Clock;
 import java.time.ZoneOffset;
+import java.util.Map;
+import java.util.Set;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.client.ChatClient;
@@ -16,12 +19,24 @@ import org.springframework.boot.context.properties.bind.validation.BindValidatio
 import org.springframework.boot.test.context.FilteredClassLoader;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.boot.test.context.runner.WebApplicationContextRunner;
+import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
+import org.springframework.data.redis.core.StringRedisTemplate;
 
+import io.github.ultron03.tokenallowance.core.Amount;
+import io.github.ultron03.tokenallowance.core.BudgetKey;
 import io.github.ultron03.tokenallowance.core.BudgetService;
+import io.github.ultron03.tokenallowance.core.Decision;
 import io.github.ultron03.tokenallowance.core.InMemoryUsageLedger;
+import io.github.ultron03.tokenallowance.core.LedgerUnavailableException;
+import io.github.ultron03.tokenallowance.core.Limit;
 import io.github.ultron03.tokenallowance.core.PriceCatalog;
+import io.github.ultron03.tokenallowance.core.Reservation;
+import io.github.ultron03.tokenallowance.core.ReservationResult;
+import io.github.ultron03.tokenallowance.core.Scope;
+import io.github.ultron03.tokenallowance.core.Spend;
 import io.github.ultron03.tokenallowance.core.TokenEstimator;
 import io.github.ultron03.tokenallowance.core.UsageLedger;
+import io.github.ultron03.tokenallowance.redis.RedisUsageLedger;
 import io.github.ultron03.tokenallowance.springai.advisor.AdmissionAdvisor;
 import io.github.ultron03.tokenallowance.springai.advisor.MeteringAdvisor;
 import io.github.ultron03.tokenallowance.springai.subject.SubjectResolver;
@@ -31,6 +46,11 @@ import jakarta.servlet.http.HttpServletRequest;
 class TokenAllowanceAutoConfigurationTest {
 
 	private static final String CUSTOMIZER = TokenAllowanceAutoConfiguration.CUSTOMIZER_BEAN_NAME;
+
+	private static final String[] USER_DAILY_LIMIT = { "token-allowance.limits[0].scope=user",
+			"token-allowance.limits[0].window=daily", "token-allowance.limits[0].max-tokens=1000" };
+
+	private static final Map<Scope, String> ALICE = Map.of(Scope.USER, "alice");
 
 	private final ApplicationContextRunner runner = new ApplicationContextRunner()
 		.withConfiguration(AutoConfigurations.of(TokenAllowanceAutoConfiguration.class));
@@ -74,6 +94,45 @@ class TokenAllowanceAutoConfigurationTest {
 	void registersNothingWithoutSpringAiChatClient() {
 		runner.withClassLoader(new FilteredClassLoader(ChatClient.class))
 			.run(context -> assertThat(context).doesNotHaveBean(BudgetService.class));
+	}
+
+	@Test
+	void keepsSpendInMemoryByDefault() {
+		runner.run(context -> assertThat(context.getBean(UsageLedger.class)).isInstanceOf(InMemoryUsageLedger.class));
+	}
+
+	@Test
+	void keepsSpendInRedisWhenStoreTypeIsRedis() {
+		runner.withBean(StringRedisTemplate.class, () -> new StringRedisTemplate(new LettuceConnectionFactory()))
+			.withPropertyValues("token-allowance.store.type=redis")
+			.run(context -> assertThat(context.getBean(UsageLedger.class)).isInstanceOf(RedisUsageLedger.class));
+	}
+
+	@Test
+	void failsStartupWhenRedisStoreIsChosenWithoutRedisModule() {
+		runner.withClassLoader(new FilteredClassLoader(RedisUsageLedger.class))
+			.withPropertyValues("token-allowance.store.type=redis")
+			.run(context -> {
+				assertThat(context).hasFailed();
+				assertThat(context.getStartupFailure()).hasStackTraceContaining(UsageLedger.class.getName());
+			});
+	}
+
+	@Test
+	void failsClosedWhenStoreIsDownInEnforceModeByDefault() {
+		runner.withBean(UsageLedger.class, UnavailableLedger::new)
+			.withPropertyValues(USER_DAILY_LIMIT)
+			.run(context -> assertThatThrownBy(() -> context.getBean(BudgetService.class).admit(ALICE))
+				.isInstanceOf(LedgerUnavailableException.class));
+	}
+
+	@Test
+	void failsOpenWhenStoreIsDownAndFailOpenIsConfigured() {
+		runner.withBean(UsageLedger.class, UnavailableLedger::new)
+			.withPropertyValues(USER_DAILY_LIMIT)
+			.withPropertyValues("token-allowance.store.failure-mode=fail-open")
+			.run(context -> assertThat(context.getBean(BudgetService.class).admit(ALICE))
+				.isEqualTo(new Decision.Allowed()));
 	}
 
 	@Test
@@ -166,5 +225,37 @@ class TokenAllowanceAutoConfigurationTest {
 				assertThat(context).hasFailed();
 				assertThat(context.getStartupFailure()).hasRootCauseInstanceOf(BindValidationException.class);
 			});
+	}
+
+	private static final class UnavailableLedger implements UsageLedger {
+
+		@Override
+		public ReservationResult reserve(Map<BudgetKey, Limit> limits, Amount estimate) {
+			throw down();
+		}
+
+		@Override
+		public Reservation reserveUnchecked(Set<BudgetKey> keys, Amount estimate) {
+			throw down();
+		}
+
+		@Override
+		public void commit(Reservation reservation, Amount actual) {
+			throw down();
+		}
+
+		@Override
+		public void release(Reservation reservation) {
+			throw down();
+		}
+
+		@Override
+		public Spend current(BudgetKey key) {
+			throw down();
+		}
+
+		private static LedgerUnavailableException down() {
+			return new LedgerUnavailableException("store down", new IllegalStateException("connection refused"));
+		}
 	}
 }

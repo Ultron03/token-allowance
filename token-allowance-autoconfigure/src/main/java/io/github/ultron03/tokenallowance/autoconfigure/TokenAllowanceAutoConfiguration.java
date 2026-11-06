@@ -11,11 +11,13 @@ import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBooleanProperty;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.ResourceLoader;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.util.ClassUtils;
 
 import io.github.ultron03.tokenallowance.autoconfigure.TokenAllowanceProperties.Pricing;
@@ -26,6 +28,7 @@ import io.github.ultron03.tokenallowance.core.InMemoryUsageLedger;
 import io.github.ultron03.tokenallowance.core.PriceCatalog;
 import io.github.ultron03.tokenallowance.core.TokenEstimator;
 import io.github.ultron03.tokenallowance.core.UsageLedger;
+import io.github.ultron03.tokenallowance.redis.RedisUsageLedger;
 import io.github.ultron03.tokenallowance.springai.advisor.AdmissionAdvisor;
 import io.github.ultron03.tokenallowance.springai.advisor.MeteringAdvisor;
 import io.github.ultron03.tokenallowance.springai.subject.AdvisorParamSubjectResolver;
@@ -58,6 +61,8 @@ public class TokenAllowanceAutoConfiguration {
 
 	private static final String SERVLET_REQUEST_CLASS = "jakarta.servlet.http.HttpServletRequest";
 
+	private static final String STORE_PREFIX = TokenAllowanceProperties.PREFIX + ".store";
+
 	/** The clock that tells which window a call falls in. */
 	@Bean
 	@ConditionalOnMissingBean
@@ -84,6 +89,7 @@ public class TokenAllowanceAutoConfiguration {
 	/** Spend kept in memory, so per instance and lost on restart. */
 	@Bean
 	@ConditionalOnMissingBean
+	@ConditionalOnProperty(prefix = STORE_PREFIX, name = "type", havingValue = "in-memory", matchIfMissing = true)
 	UsageLedger usageLedger(Clock clock, TokenAllowanceProperties properties) {
 		return new InMemoryUsageLedger(clock, properties.zone());
 	}
@@ -94,7 +100,9 @@ public class TokenAllowanceAutoConfiguration {
 	BudgetService budgetService(UsageLedger ledger, PriceCatalog priceCatalog, Clock clock,
 			TokenAllowanceProperties properties) {
 		return new BudgetService(ledger, priceCatalog, PropertyMapping.limits(properties.limits()),
-				PropertyMapping.requestLimit(properties.perRequest()), properties.mode(), clock, properties.zone());
+				PropertyMapping.requestLimit(properties.perRequest()), properties.mode(),
+				PropertyMapping.failureMode(properties.store().failureMode(), properties.mode()), clock,
+				properties.zone());
 	}
 
 	/**
@@ -138,6 +146,22 @@ public class TokenAllowanceAutoConfiguration {
 	ChatClientBuilderCustomizer tokenAllowanceChatClientBuilderCustomizer(AdmissionAdvisor admissionAdvisor,
 			MeteringAdvisor meteringAdvisor) {
 		return builder -> builder.defaultAdvisors(admissionAdvisor, meteringAdvisor);
+	}
+
+	/**
+	 * The Redis ledger, in its own class so an app without the Redis module never loads its types.
+	 */
+	@Configuration(proxyBeanMethods = false)
+	@ConditionalOnClass({ RedisUsageLedger.class, StringRedisTemplate.class })
+	@ConditionalOnProperty(prefix = STORE_PREFIX, name = "type", havingValue = "redis")
+	static class RedisLedgerConfiguration {
+
+		/** Spend kept in Redis, shared by every instance of the app. */
+		@Bean
+		@ConditionalOnMissingBean
+		UsageLedger redisUsageLedger(StringRedisTemplate redis, TokenAllowanceProperties properties) {
+			return new RedisUsageLedger(redis, properties.zone());
+		}
 	}
 
 	/**

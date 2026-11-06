@@ -11,7 +11,9 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -41,31 +43,37 @@ public class BudgetService {
 
 	private final Set<String> modelsWithoutUsage;
 
+	private final LedgerFailureMode failureMode;
+
+	private final AtomicBoolean ledgerDown;
+
 	/**
-	 * Creates the service without per-request caps.
+	 * Creates the service without per-request caps, failing open in observe mode and closed in enforce mode.
 	 * @param limits the configured limits; at most one per scope and window
 	 * @param zone the zone windows start in
 	 * @throws IllegalArgumentException if two limits share a scope and window
 	 */
 	public BudgetService(UsageLedger ledger, PriceCatalog priceCatalog, List<Limit> limits, EnforcementMode mode,
 			Clock clock, ZoneId zone) {
-		this(ledger, priceCatalog, limits, RequestLimit.NONE, mode, clock, zone);
+		this(ledger, priceCatalog, limits, RequestLimit.NONE, mode, LedgerFailureMode.defaultFor(mode), clock, zone);
 	}
 
 	/**
 	 * Creates the service.
 	 * @param limits the configured limits; at most one per scope and window
 	 * @param requestLimit the caps on each single request
+	 * @param failureMode what happens to new calls while the ledger can't be reached
 	 * @param zone the zone windows start in
 	 * @throws IllegalArgumentException if two limits share a scope and window
 	 */
 	public BudgetService(UsageLedger ledger, PriceCatalog priceCatalog, List<Limit> limits, RequestLimit requestLimit,
-			EnforcementMode mode, Clock clock, ZoneId zone) {
+			EnforcementMode mode, LedgerFailureMode failureMode, Clock clock, ZoneId zone) {
 		Objects.requireNonNull(ledger, "ledger can't be null");
 		Objects.requireNonNull(priceCatalog, "priceCatalog can't be null");
 		Objects.requireNonNull(limits, "limits can't be null");
 		Objects.requireNonNull(requestLimit, "requestLimit can't be null");
 		Objects.requireNonNull(mode, "mode can't be null");
+		Objects.requireNonNull(failureMode, "failureMode can't be null");
 		Objects.requireNonNull(clock, "clock can't be null");
 		Objects.requireNonNull(zone, "zone can't be null");
 		requireOneLimitPerScopeAndWindow(limits);
@@ -75,9 +83,11 @@ public class BudgetService {
 		this.limits = List.copyOf(limits);
 		this.requestLimit = requestLimit;
 		this.mode = mode;
+		this.failureMode = failureMode;
 		this.clock = clock;
 		this.zone = zone;
 		this.modelsWithoutUsage = ConcurrentHashMap.newKeySet();
+		this.ledgerDown = new AtomicBoolean(false);
 	}
 
 	/**
@@ -85,12 +95,26 @@ public class BudgetService {
 	 * flight are not counted here; {@link #reserve} checks those.
 	 * @param subjectIds who is calling, one id per scope; {@link Scope#GLOBAL} needs none
 	 * @return {@link Decision.Allowed}, or {@link Decision.Denied} in enforce mode
+	 * @throws LedgerUnavailableException if the ledger can't be reached and the failure mode is fail-closed
 	 */
 	public Decision admit(Map<Scope, String> subjectIds) {
 		Objects.requireNonNull(subjectIds, "subjectIds can't be null");
 		Instant now = this.clock.instant();
+		Map<BudgetKey, Limit> keys = keysFor(subjectIds, now);
 
-		for (Map.Entry<BudgetKey, Limit> entry : keysFor(subjectIds, now).entrySet()) {
+		try {
+			Decision decision = admitOnLedger(keys, now);
+			markLedgerUp();
+			return decision;
+		}
+		catch (LedgerUnavailableException ex) {
+			onLedgerUnavailable(ex);
+			return new Decision.Allowed();
+		}
+	}
+
+	private Decision admitOnLedger(Map<BudgetKey, Limit> keys, Instant now) {
+		for (Map.Entry<BudgetKey, Limit> entry : keys.entrySet()) {
 			Amount committed = this.ledger.current(entry.getKey()).committed();
 			if (entry.getValue().isReachedBy(committed)) {
 				if (this.mode == EnforcementMode.ENFORCE) {
@@ -140,6 +164,7 @@ public class BudgetService {
 	 * @param estimate the expected usage of the call
 	 * @return {@link Decision.Reserved}, or {@link Decision.Denied} in enforce mode
 	 * @throws UnknownModelException if the model has no price and the unknown-model policy rejects it
+	 * @throws LedgerUnavailableException if the ledger can't be reached and the failure mode is fail-closed
 	 */
 	public Decision reserve(Map<Scope, String> subjectIds, String model, TokenUsage estimate) {
 		Objects.requireNonNull(subjectIds, "subjectIds can't be null");
@@ -149,6 +174,19 @@ public class BudgetService {
 		Map<BudgetKey, Limit> keys = keysFor(subjectIds, now);
 		Amount amount = new Amount(estimate.total(), costOf(model, estimate));
 
+		try {
+			Decision decision = reserveOnLedger(keys, amount, now);
+			markLedgerUp();
+			return decision;
+		}
+		catch (LedgerUnavailableException ex) {
+			onLedgerUnavailable(ex);
+			// Never stored, so settling it later changes nothing.
+			return new Decision.Reserved(new Reservation(UUID.randomUUID().toString(), keys.keySet(), amount));
+		}
+	}
+
+	private Decision reserveOnLedger(Map<BudgetKey, Limit> keys, Amount amount, Instant now) {
 		ReservationResult result = this.ledger.reserve(keys, amount);
 		if (result instanceof ReservationResult.Reserved reserved) {
 			return new Decision.Reserved(reserved.reservation());
@@ -164,7 +202,8 @@ public class BudgetService {
 
 	/**
 	 * Charges the actual usage of a finished call. Never denied, because the call already happened.
-	 * Charges the estimate instead if the provider reported no usage.
+	 * Charges the estimate instead if the provider reported no usage. If the ledger can't be reached
+	 * the charge is lost and logged, in every failure mode.
 	 * @param model the model the call went to, used to price the usage
 	 * @return what was charged, so the caller can add it to the request's total
 	 */
@@ -181,14 +220,28 @@ public class BudgetService {
 		else {
 			charged = new Amount(actual.total(), costOf(model, actual));
 		}
-		this.ledger.commit(reservation, charged);
+		try {
+			this.ledger.commit(reservation, charged);
+			markLedgerUp();
+		}
+		catch (LedgerUnavailableException ex) {
+			markLedgerDown(ex);
+			log.debug("Reservation {} not settled, budget store unavailable", reservation.id());
+		}
 		return charged;
 	}
 
-	/** Drops the reservation of a call that failed, without charging it. */
+	/** Drops the reservation of a call that failed, without charging it. Never throws if the ledger can't be reached. */
 	public void release(Reservation reservation) {
 		Objects.requireNonNull(reservation, "reservation can't be null");
-		this.ledger.release(reservation);
+		try {
+			this.ledger.release(reservation);
+			markLedgerUp();
+		}
+		catch (LedgerUnavailableException ex) {
+			markLedgerDown(ex);
+			log.debug("Reservation {} not released, budget store unavailable", reservation.id());
+		}
 	}
 
 	private static void requireOneLimitPerScopeAndWindow(List<Limit> limits) {
@@ -226,6 +279,29 @@ public class BudgetService {
 	private void logObserved(BudgetKey key) {
 		log.warn("Observe mode: {} {} budget exceeded, call allowed", key.scope(), key.window());
 		log.debug("Observe mode: budget exceeded for subject '{}'", key.subjectId());
+	}
+
+	/** Rethrows in fail-closed mode; in fail-open mode the caller goes ahead without the ledger. */
+	private void onLedgerUnavailable(LedgerUnavailableException ex) {
+		markLedgerDown(ex);
+		if (this.failureMode == LedgerFailureMode.FAIL_CLOSED) {
+			throw ex;
+		}
+	}
+
+	private void markLedgerDown(LedgerUnavailableException ex) {
+		if (this.ledgerDown.compareAndSet(false, true)) {
+			String consequence = (this.failureMode == LedgerFailureMode.FAIL_OPEN)
+					? "calls go ahead without budget checks and their spend is not recorded"
+					: "new calls are rejected until it is back";
+			log.warn("Budget store unavailable; {}", consequence, ex);
+		}
+	}
+
+	private void markLedgerUp() {
+		if (this.ledgerDown.compareAndSet(true, false)) {
+			log.info("Budget store reachable again");
+		}
 	}
 
 	private void warnUsageMissingOnce(String model) {

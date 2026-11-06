@@ -51,6 +51,17 @@ class BudgetExceededExceptionHandlerTest {
 		assertThat(response.getHeaders().containsHeader(HttpHeaders.RETRY_AFTER)).isFalse();
 	}
 
+	@Test
+	void answersUnavailableBudgetStoreWithServiceUnavailable() {
+		ResponseEntity<ProblemDetail> response = this.handler.handleLedgerUnavailable();
+
+		assertThat(response.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+		ProblemDetail problem = response.getBody();
+		assertThat(problem).isNotNull();
+		assertThat(problem.getTitle()).isEqualTo(BudgetExceededExceptionHandler.STORE_UNAVAILABLE_TITLE);
+		assertThat(response.getHeaders().containsHeader(HttpHeaders.RETRY_AFTER)).isFalse();
+	}
+
 	private ResponseEntity<ProblemDetail> handle(String reason, Duration retryAfter) {
 		return this.handler.handle(new BudgetExceededException(new Decision.Denied(reason, retryAfter)));
 	}
