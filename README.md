@@ -229,6 +229,38 @@ ChatClient chatClient = ChatClient.builder(chatModel)
 - **A stream can be subscribed only once.** Spring AI runs its advisor chain once per `stream()` call. Subscribing twice to the same result fails instead of making a second call; call `stream()` again for a new request.
 - **A streamed response that has started can't become a 429.** If a budget runs out during a tool loop after the first chunk was sent, the HTTP status is already fixed, so the error ends the stream instead.
 
+
+## Adoption & Distribution
+
+Token Allowance is published on Maven Central
+as a modular set of five artifacts.
+
+### Maven Central Adoption
+
+According to Sonatype Publisher Insights,
+the `io.github.ultron03` namespace recorded
+the following activity over the last three months:
+
+| Metric | Value |
+|---|---:|
+| Downloads | 432 |
+| Unique sources | 49 |
+| Companies | 19 |
+
+### Package Analytics
+
+Package-level analytics are available through Scarf.
+
+The project distributes five Maven artifacts:
+- token-allowance-core
+- token-allowance-spring-ai
+- token-allowance-autoconfigure
+- token-allowance-spring-boot-starter
+- token-allowance-parent
+
+[View Maven Central](https://central.sonatype.com/)
+
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build, test and send a pull request.
