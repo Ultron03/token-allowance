@@ -7,9 +7,15 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -31,6 +37,12 @@ class RedisUsageLedgerTest extends RedisTestSupport {
 	private static final Amount ESTIMATE = new Amount(1000, new Money(500));
 
 	private static final Amount ACTUAL = new Amount(300, new Money(150));
+
+	private static final int THREADS = 50;
+
+	private static final int RACES = 100;
+
+	private static final int GLOBAL_ROOM = 10;
 
 	private final BudgetKey alice = BudgetKey.of(Scope.USER, "alice", Window.DAILY, Instant.now(), UTC);
 
@@ -203,6 +215,74 @@ class RedisUsageLedgerTest extends RedisTestSupport {
 		Map<BudgetKey, Limit> limits = Map.of(this.alice, globalTokens(10_000));
 
 		assertThatThrownBy(() -> this.ledger.reserve(limits, ESTIMATE)).isInstanceOf(IllegalArgumentException.class);
+	}
+
+	@Test
+	void parallelReservationsNeverExceedSharedLimit() throws Exception {
+		Limit globalLimit = globalTokens(GLOBAL_ROOM * ESTIMATE.tokens());
+		List<BudgetKey> users = new ArrayList<>();
+		for (int i = 0; i < THREADS; i++) {
+			users.add(BudgetKey.of(Scope.USER, "user-" + i, Window.DAILY, Instant.now(), UTC));
+		}
+
+		ExecutorService pool = Executors.newFixedThreadPool(THREADS);
+		CountDownLatch start = new CountDownLatch(1);
+		List<Future<ReservationResult>> results = new ArrayList<>();
+		try {
+			for (BudgetKey user : users) {
+				results.add(pool.submit(() -> {
+					start.await();
+					return this.ledger.reserve(Map.of(user, userTokens(10_000), this.global, globalLimit), ESTIMATE);
+				}));
+			}
+			start.countDown();
+
+			int reserved = 0;
+			for (Future<ReservationResult> result : results) {
+				if (result.get() instanceof ReservationResult.Reserved) {
+					reserved++;
+				}
+			}
+			assertThat(reserved).isEqualTo(GLOBAL_ROOM);
+		}
+		finally {
+			pool.shutdownNow();
+		}
+
+		long reservedOnUsers = users.stream().mapToLong(user -> this.ledger.current(user).reserved().tokens()).sum();
+		assertThat(this.ledger.current(this.global).reserved().tokens()).isEqualTo(GLOBAL_ROOM * ESTIMATE.tokens());
+		assertThat(reservedOnUsers).isEqualTo(GLOBAL_ROOM * ESTIMATE.tokens());
+	}
+
+	@Test
+	void racingCommitAndReleaseSettleEachReservationOnce() throws Exception {
+		ExecutorService pool = Executors.newFixedThreadPool(2);
+		try {
+			for (int i = 0; i < RACES; i++) {
+				Reservation reservation = this.ledger.reserveUnchecked(Set.of(this.alice), ESTIMATE);
+				CountDownLatch start = new CountDownLatch(1);
+				Future<?> commit = pool.submit(() -> {
+					start.await();
+					this.ledger.commit(reservation, ACTUAL);
+					return null;
+				});
+				Future<?> release = pool.submit(() -> {
+					start.await();
+					this.ledger.release(reservation);
+					return null;
+				});
+				start.countDown();
+				commit.get();
+				release.get();
+			}
+		}
+		finally {
+			pool.shutdownNow();
+		}
+
+		Spend spend = this.ledger.current(this.alice);
+		assertThat(spend.reserved()).isEqualTo(Amount.ZERO);
+		assertThat(spend.committed().tokens()).isLessThanOrEqualTo(RACES * ACTUAL.tokens());
 	}
 
 	private static Limit userTokens(long maxTokens) {
