@@ -28,6 +28,7 @@ import io.github.ultron03.tokenallowance.core.ConfiguredPriceCatalog;
 import io.github.ultron03.tokenallowance.core.ConservativeTokenEstimator;
 import io.github.ultron03.tokenallowance.core.EnforcementMode;
 import io.github.ultron03.tokenallowance.core.InMemoryUsageLedger;
+import io.github.ultron03.tokenallowance.core.LedgerFailureMode;
 import io.github.ultron03.tokenallowance.core.Limit;
 import io.github.ultron03.tokenallowance.core.ModelPrice;
 import io.github.ultron03.tokenallowance.core.Money;
@@ -312,7 +313,7 @@ class MeteringAdvisorTest {
 		ConfiguredPriceCatalog catalog = new ConfiguredPriceCatalog(Map.of(FakeChatModel.MODEL_NAME, PRICE),
 				UnknownModelPolicy.REJECT, null);
 		return new BudgetService(this.ledger, catalog, List.of(limits), requestLimit, EnforcementMode.ENFORCE,
-				this.clock, ZONE);
+				LedgerFailureMode.FAIL_CLOSED, this.clock, ZONE);
 	}
 
 	private static FakeChatModel answering() {

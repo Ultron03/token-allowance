@@ -50,6 +50,8 @@ class TokenAllowancePropertiesTest {
 		assertThat(properties.perRequest().maxCost()).isNull();
 		assertThat(properties.stream().interrupted()).isEqualTo(InterruptedStreamPolicy.CHARGE_ESTIMATE);
 		assertThat(properties.web().exceptionHandler()).isTrue();
+		assertThat(properties.store().type()).isEqualTo(TokenAllowanceProperties.StoreType.IN_MEMORY);
+		assertThat(properties.store().failureMode()).isEqualTo(TokenAllowanceProperties.StoreFailureMode.AUTO);
 	}
 
 	@Test
@@ -67,11 +69,13 @@ class TokenAllowancePropertiesTest {
 		TokenAllowanceProperties properties = bind(Map.of(
 				"token-allowance.mode", "observe",
 				"token-allowance.pricing.unknown-model", "allow-uncosted",
-				"token-allowance.stream.interrupted", "release"));
+				"token-allowance.stream.interrupted", "release",
+				"token-allowance.store.failure-mode", "fail-open"));
 
 		assertThat(properties.mode()).isEqualTo(EnforcementMode.OBSERVE);
 		assertThat(properties.pricing().unknownModel()).isEqualTo(UnknownModelPolicy.ALLOW_UNCOSTED);
 		assertThat(properties.stream().interrupted()).isEqualTo(InterruptedStreamPolicy.RELEASE);
+		assertThat(properties.store().failureMode()).isEqualTo(TokenAllowanceProperties.StoreFailureMode.FAIL_OPEN);
 	}
 
 	@Test

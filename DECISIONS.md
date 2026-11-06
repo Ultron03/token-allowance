@@ -399,3 +399,62 @@ present, so it needs an implementation that nothing provided.
 **Consequence**
 - Hibernate Validator is on the classpath of every app that uses the starter.
 - Fixed in 0.1.1; 0.1.0 needs `spring-boot-starter-validation` added by hand.
+
+## 19. Redis key schema (2026-10-31)
+
+**Context**
+The Redis ledger must keep the same counters as the in-memory one, shared by every instance of an
+app. One reserve changes several budgets at once (user, tenant, global), so a Lua script has to
+reach all of their keys, also on Redis Cluster.
+
+**Decision**
+- Every key starts with the hash tag `{ta}`, so all keys share one Cluster slot and one script can
+  touch them.
+- A budget is a hash at `{ta}:budget:{scope}:{window}:{windowStartEpochSeconds}:{subject}` with the
+  fields `committed_tokens`, `committed_micros`, `reserved_tokens` and `reserved_micros`. A missing
+  field is 0. The subject goes last because only it may contain `:` or `{`.
+- A budget key expires one day after its window ends, so a call that spans the window end can still
+  settle. Java computes the time, since Redis doesn't know the configured zone, and every script
+  that writes a budget key sets the expiry again.
+- An open reservation is a key `{ta}:reservation:{id}` that lives one day. Settling deletes it and
+  changes the counters only if the delete removed something, so settling twice is a no-op. The
+  amount and keys come from the `Reservation` the caller passes in.
+- Time comes from the app's `Clock`, not from Redis.
+
+**Consequence**
+- On Cluster, all budget keys live on one node.
+- If an instance stops between reserve and settle, its estimate stays reserved until the budget key
+  expires. Reclaiming it is in `IDEAS.md`.
+- A call that settles more than a day after it reserved is not charged.
+
+## 20. Redis failure mode and store settings (2026-11-07)
+
+**Context**
+With the Redis ledger, a Redis outage would otherwise turn every chat request into a 500. Some apps
+would rather keep serving without budgets, others would rather stop spending money they can't
+count.
+
+**Decision**
+- `RedisUsageLedger` turns a refused connection (`DataAccessResourceFailureException`) or a command
+  timeout (`QueryTimeoutException`) into core's `LedgerUnavailableException`. Other Redis errors,
+  such as a failing script, are bugs and pass through.
+- `BudgetService` applies `LedgerFailureMode`. `FAIL_OPEN` admits the request and returns a
+  reservation that was never stored, so settling it changes nothing. `FAIL_CLOSED` rethrows.
+  `store.failure-mode: auto`, the default, fails open in observe mode and closed in enforce mode.
+- Settle and release never throw for an outage, in either mode: the call already happened, and
+  throwing would lose a response that was paid for. The charge is lost and logged.
+- The outage is logged once at WARN when it starts and once at INFO when the ledger answers again.
+- Fail-closed answers 503 with a fixed ProblemDetail, not 429: the client didn't use up a budget,
+  and `Retry-After` until the window resets would be wrong.
+- No health contributor of our own. Spring Boot's `redis` health indicator already pings the same
+  connection.
+- `store.type` picks the ledger with a property condition on each ledger bean, so the result doesn't
+  depend on the order beans are registered in. The Redis bean lives in its own nested configuration
+  that only loads when the Redis module is on the classpath.
+
+**Consequence**
+- Spend during a fail-open outage is never recorded, also not after Redis is back.
+- Without `spring.data.redis.timeout`, Lettuce waits 60 seconds per command before the failure mode
+  applies. The README tells users to set it.
+- `store.type: redis` without the Redis module fails at startup because no `UsageLedger` bean
+  exists.

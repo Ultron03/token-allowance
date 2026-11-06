@@ -18,5 +18,38 @@
             <groupId>io.github.ultron03</groupId>
             <artifactId>token-allowance-core</artifactId>
       </dependency>
-  </dependencies>
+      <dependency>
+          <groupId>org.springframework.data</groupId>
+          <artifactId>spring-data-redis</artifactId>
+      </dependency>
+      <dependency>
+          <groupId>org.jspecify</groupId>
+          <artifactId>jspecify</artifactId>
+      </dependency>
+      <dependency>
+          <groupId>io.lettuce</groupId>
+          <artifactId>lettuce-core</artifactId>
+          <scope>test</scope>
+      </dependency>
+      <dependency>
+          <groupId>org.testcontainers</groupId>
+          <artifactId>testcontainers</artifactId>
+          <scope>test</scope>
+      </dependency>
+      <dependency>
+          <groupId>org.testcontainers</groupId>
+          <artifactId>testcontainers-junit-jupiter</artifactId>
+          <scope>test</scope>
+      </dependency>
+      <dependency>
+          <groupId>org.junit.jupiter</groupId>
+          <artifactId>junit-jupiter</artifactId>
+          <scope>test</scope>
+      </dependency>
+      <dependency>
+          <groupId>org.assertj</groupId>
+          <artifactId>assertj-core</artifactId>
+          <scope>test</scope>
+      </dependency>
+    </dependencies>
 </project>

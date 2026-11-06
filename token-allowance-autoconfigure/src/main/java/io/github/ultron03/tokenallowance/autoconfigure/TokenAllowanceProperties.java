@@ -33,6 +33,7 @@ import jakarta.validation.constraints.PositiveOrZero;
  * @param perRequest caps on one request, to cut off runaway tool loops
  * @param stream how interrupted streams are charged
  * @param web the HTTP response for a used-up budget
+ * @param store where spend is kept and what happens while it can't be reached
  */
 @ConfigurationProperties(TokenAllowanceProperties.PREFIX)
 @Validated
@@ -40,7 +41,7 @@ public record TokenAllowanceProperties(@DefaultValue("true") boolean enabled,
 		@DefaultValue("enforce") EnforcementMode mode, @DefaultValue("UTC") ZoneId zone,
 		@DefaultValue @Valid Subject subject, @DefaultValue @Valid Pricing pricing,
 		@DefaultValue List<@Valid LimitProperties> limits, @DefaultValue @Valid PerRequest perRequest,
-		@DefaultValue Streaming stream, @DefaultValue Web web) {
+		@DefaultValue Streaming stream, @DefaultValue Web web, @DefaultValue Store store) {
 
 	/** Prefix of all Token Allowance properties. */
 	public static final String PREFIX = "token-allowance";
@@ -137,5 +138,38 @@ public record TokenAllowanceProperties(@DefaultValue("true") boolean enabled,
 	 * @param exceptionHandler whether a used-up budget is answered with 429 and a ProblemDetail body
 	 */
 	public record Web(@DefaultValue("true") boolean exceptionHandler) {
+	}
+
+	/**
+	 * Where spend is kept.
+	 *
+	 * @param type in-memory keeps budgets per instance; redis shares them across instances
+	 * @param failureMode what happens to new calls while the store can't be reached; auto fails open
+	 *        in observe mode and closed in enforce mode
+	 */
+	public record Store(@DefaultValue("in-memory") StoreType type, @DefaultValue("auto") StoreFailureMode failureMode) {
+	}
+
+	/** Where spend is kept. */
+	public enum StoreType {
+
+		/** In this instance's memory, lost on restart. */
+		IN_MEMORY,
+
+		/** In Redis, shared by every instance; needs the token-allowance-redis module. */
+		REDIS
+	}
+
+	/** What happens to new calls while the store can't be reached. */
+	public enum StoreFailureMode {
+
+		/** Fail open in observe mode and closed in enforce mode. */
+		AUTO,
+
+		/** Calls go ahead without budget checks, and their spend is not recorded. */
+		FAIL_OPEN,
+
+		/** Calls are rejected with 503. */
+		FAIL_CLOSED
 	}
 }

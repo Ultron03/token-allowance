@@ -8,6 +8,9 @@ import java.util.Set;
  *
  * <p>Implementations must check and reserve all keys in one atomic step, so two parallel calls
  * can't both pass the check and overspend together.
+ *
+ * <p>Any method may throw {@link LedgerUnavailableException} when the store can't be reached;
+ * {@link BudgetService} then applies its {@link LedgerFailureMode}.
  */
 public interface UsageLedger {
 

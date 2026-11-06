@@ -142,10 +142,6 @@
 							<publishingServerId>central</publishingServerId>
 							<!-- Upload and validate only; the release is published by hand in the Central Portal. -->
 							<autoPublish>false</autoPublish>
-							<excludeArtifacts>
-								<!-- Empty until the Redis ledger is written. -->
-								<artifact>token-allowance-redis</artifact>
-							</excludeArtifacts>
 						</configuration>
 					</plugin>
 				</plugins>
