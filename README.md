@@ -19,7 +19,9 @@ as a modular set of five artifacts.
 
 ### Maven Central Adoption
 
-According to Sonatype Publisher Insights,
+According to Sonatype Publisher Insights
+(**3-month reporting period, as of November 7, 2026**):
+
 the `io.github.ultron03` namespace recorded
 the following activity over the last three months:
 
