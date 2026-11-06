@@ -1,7 +1,10 @@
 # Token Allowance
 
+
 [![CI](https://github.com/Ultron03/token-allowance/actions/workflows/ci.yml/badge.svg)](https://github.com/Ultron03/token-allowance/actions/workflows/ci.yml)
 [![Maven Central](https://img.shields.io/maven-central/v/io.github.ultron03/token-allowance-spring-boot-starter)](https://central.sonatype.com/artifact/io.github.ultron03/token-allowance-spring-boot-starter)
+[![License](https://img.shields.io/github/license/Ultron03/token-allowance)](LICENSE)
+![Java](https://img.shields.io/badge/Java-17%2B-orange)
 
 A Spring Boot starter that enforces per-user, per-tenant and per-session token and dollar budgets on Spring AI `ChatClient` calls. It also caps runaway tool loops, so one request can't make a hundred model calls.
 
@@ -9,6 +12,35 @@ A Spring Boot starter that enforces per-user, per-tenant and per-session token a
 
 Try it without an API key: [token-allowance-demo](https://github.com/Ultron03/token-allowance-demo) runs against a local Ollama model.
 
+## Adoption & Distribution
+
+Token Allowance is published on Maven Central
+as a modular set of five artifacts.
+
+### Maven Central Adoption
+
+According to Sonatype Publisher Insights,
+the `io.github.ultron03` namespace recorded
+the following activity over the last three months:
+
+| Metric | Value |
+|---|---:|
+| Downloads | 432 |
+| Unique sources | 49 |
+| Companies | 19 |
+
+### Package Analytics
+
+Package-level analytics are available through Scarf.
+
+The project distributes five Maven artifacts:
+- token-allowance-core
+- token-allowance-spring-ai
+- token-allowance-autoconfigure
+- token-allowance-spring-boot-starter
+- token-allowance-parent
+
+[View Maven Central](https://central.sonatype.com/)
 
 ## Why
 
@@ -228,37 +260,6 @@ ChatClient chatClient = ChatClient.builder(chatModel)
 - **A denied stream logs an ERROR line.** When a budget denies a streamed call, Spring AI's `MessageAggregator` logs `Aggregation Error` with the `BudgetExceededException`, even when your app handles the exception. The log line comes from Spring AI and can be ignored.
 - **A stream can be subscribed only once.** Spring AI runs its advisor chain once per `stream()` call. Subscribing twice to the same result fails instead of making a second call; call `stream()` again for a new request.
 - **A streamed response that has started can't become a 429.** If a budget runs out during a tool loop after the first chunk was sent, the HTTP status is already fixed, so the error ends the stream instead.
-
-
-## Adoption & Distribution
-
-Token Allowance is published on Maven Central
-as a modular set of five artifacts.
-
-### Maven Central Adoption
-
-According to Sonatype Publisher Insights,
-the `io.github.ultron03` namespace recorded
-the following activity over the last three months:
-
-| Metric | Value |
-|---|---:|
-| Downloads | 432 |
-| Unique sources | 49 |
-| Companies | 19 |
-
-### Package Analytics
-
-Package-level analytics are available through Scarf.
-
-The project distributes five Maven artifacts:
-- token-allowance-core
-- token-allowance-spring-ai
-- token-allowance-autoconfigure
-- token-allowance-spring-boot-starter
-- token-allowance-parent
-
-[View Maven Central](https://central.sonatype.com/)
 
 
 ## Contributing
