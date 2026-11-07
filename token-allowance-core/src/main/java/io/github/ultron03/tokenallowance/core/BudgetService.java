@@ -4,6 +4,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -47,6 +48,8 @@ public class BudgetService {
 
 	private final AtomicBoolean ledgerDown;
 
+	private final List<BudgetListener> listeners;
+
 	/**
 	 * Creates the service without per-request caps, failing open in observe mode and closed in enforce mode.
 	 * @param limits the configured limits; at most one per scope and window
@@ -59,7 +62,7 @@ public class BudgetService {
 	}
 
 	/**
-	 * Creates the service.
+	 * Creates the service without listeners.
 	 * @param limits the configured limits; at most one per scope and window
 	 * @param requestLimit the caps on each single request
 	 * @param failureMode what happens to new calls while the ledger can't be reached
@@ -68,6 +71,21 @@ public class BudgetService {
 	 */
 	public BudgetService(UsageLedger ledger, PriceCatalog priceCatalog, List<Limit> limits, RequestLimit requestLimit,
 			EnforcementMode mode, LedgerFailureMode failureMode, Clock clock, ZoneId zone) {
+		this(ledger, priceCatalog, limits, requestLimit, mode, failureMode, clock, zone, List.of());
+	}
+
+	/**
+	 * Creates the service.
+	 * @param limits the configured limits; at most one per scope and window
+	 * @param requestLimit the caps on each single request
+	 * @param failureMode what happens to new calls while the ledger can't be reached
+	 * @param zone the zone windows start in
+	 * @param listeners told about every decision and settled call, in this order
+	 * @throws IllegalArgumentException if two limits share a scope and window
+	 */
+	public BudgetService(UsageLedger ledger, PriceCatalog priceCatalog, List<Limit> limits, RequestLimit requestLimit,
+			EnforcementMode mode, LedgerFailureMode failureMode, Clock clock, ZoneId zone,
+			List<BudgetListener> listeners) {
 		Objects.requireNonNull(ledger, "ledger can't be null");
 		Objects.requireNonNull(priceCatalog, "priceCatalog can't be null");
 		Objects.requireNonNull(limits, "limits can't be null");
@@ -76,6 +94,7 @@ public class BudgetService {
 		Objects.requireNonNull(failureMode, "failureMode can't be null");
 		Objects.requireNonNull(clock, "clock can't be null");
 		Objects.requireNonNull(zone, "zone can't be null");
+		Objects.requireNonNull(listeners, "listeners can't be null");
 		requireOneLimitPerScopeAndWindow(limits);
 
 		this.ledger = ledger;
@@ -88,6 +107,7 @@ public class BudgetService {
 		this.zone = zone;
 		this.modelsWithoutUsage = ConcurrentHashMap.newKeySet();
 		this.ledgerDown = new AtomicBoolean(false);
+		this.listeners = List.copyOf(listeners);
 	}
 
 	/**
@@ -108,21 +128,30 @@ public class BudgetService {
 			return decision;
 		}
 		catch (LedgerUnavailableException ex) {
+			notifyDecision(DecisionMade.Stage.ADMISSION, DecisionMade.Outcome.LEDGER_UNAVAILABLE, null);
 			onLedgerUnavailable(ex);
 			return new Decision.Allowed();
 		}
 	}
 
 	private Decision admitOnLedger(Map<BudgetKey, Limit> keys, Instant now) {
+		@Nullable Scope observedScope = null;
 		for (Map.Entry<BudgetKey, Limit> entry : keys.entrySet()) {
 			Amount committed = this.ledger.current(entry.getKey()).committed();
 			if (entry.getValue().isReachedBy(committed)) {
 				if (this.mode == EnforcementMode.ENFORCE) {
+					notifyDecision(DecisionMade.Stage.ADMISSION, DecisionMade.Outcome.DENIED, entry.getKey().scope());
 					return denied(entry.getKey(), now);
 				}
 				logObserved(entry.getKey());
+				if (observedScope == null) {
+					observedScope = entry.getKey().scope();
+				}
 			}
 		}
+		DecisionMade.Outcome outcome = (observedScope == null) ? DecisionMade.Outcome.ALLOWED
+				: DecisionMade.Outcome.OBSERVED;
+		notifyDecision(DecisionMade.Stage.ADMISSION, outcome, observedScope);
 		return new Decision.Allowed();
 	}
 
@@ -151,8 +180,10 @@ public class BudgetService {
 			return new Decision.Allowed();
 		}
 		if (this.mode == EnforcementMode.ENFORCE) {
+			notifyDecision(DecisionMade.Stage.REQUEST, DecisionMade.Outcome.DENIED, null);
 			return new Decision.Denied(reason, Duration.ZERO);
 		}
+		notifyDecision(DecisionMade.Stage.REQUEST, DecisionMade.Outcome.OBSERVED, null);
 		log.warn("Observe mode: {}, call allowed", reason);
 		return new Decision.Allowed();
 	}
@@ -180,6 +211,7 @@ public class BudgetService {
 			return decision;
 		}
 		catch (LedgerUnavailableException ex) {
+			notifyDecision(DecisionMade.Stage.RESERVATION, DecisionMade.Outcome.LEDGER_UNAVAILABLE, null);
 			onLedgerUnavailable(ex);
 			// Never stored, so settling it later changes nothing.
 			return new Decision.Reserved(new Reservation(UUID.randomUUID().toString(), keys.keySet(), amount));
@@ -189,15 +221,19 @@ public class BudgetService {
 	private Decision reserveOnLedger(Map<BudgetKey, Limit> keys, Amount amount, Instant now) {
 		ReservationResult result = this.ledger.reserve(keys, amount);
 		if (result instanceof ReservationResult.Reserved reserved) {
+			notifyDecision(DecisionMade.Stage.RESERVATION, DecisionMade.Outcome.ALLOWED, null);
 			return new Decision.Reserved(reserved.reservation());
 		}
 
 		BudgetKey exceededKey = ((ReservationResult.Exceeded) result).key();
 		if (this.mode == EnforcementMode.ENFORCE) {
+			notifyDecision(DecisionMade.Stage.RESERVATION, DecisionMade.Outcome.DENIED, exceededKey.scope());
 			return denied(exceededKey, now);
 		}
 		logObserved(exceededKey);
-		return new Decision.Reserved(this.ledger.reserveUnchecked(keys.keySet(), amount));
+		Reservation reservation = this.ledger.reserveUnchecked(keys.keySet(), amount);
+		notifyDecision(DecisionMade.Stage.RESERVATION, DecisionMade.Outcome.OBSERVED, exceededKey.scope());
+		return new Decision.Reserved(reservation);
 	}
 
 	/**
@@ -228,12 +264,19 @@ public class BudgetService {
 			markLedgerDown(ex);
 			log.debug("Reservation {} not settled, budget store unavailable", reservation.id());
 		}
+		CallSettled.Outcome outcome = actual.isZero() ? CallSettled.Outcome.ESTIMATE_CHARGED
+				: CallSettled.Outcome.CHARGED;
+		notifySettled(new CallSettled(model, reservation.keys(), reservation.amount(), actual, charged, outcome));
 		return charged;
 	}
 
-	/** Drops the reservation of a call that failed, without charging it. Never throws if the ledger can't be reached. */
-	public void release(Reservation reservation) {
+	/**
+	 * Drops the reservation of a call that failed, without charging it. Never throws if the ledger can't be reached.
+	 * @param model the model the call went to, passed on to listeners
+	 */
+	public void release(Reservation reservation, String model) {
 		Objects.requireNonNull(reservation, "reservation can't be null");
+		Objects.requireNonNull(model, "model can't be null");
 		try {
 			this.ledger.release(reservation);
 			markLedgerUp();
@@ -242,6 +285,8 @@ public class BudgetService {
 			markLedgerDown(ex);
 			log.debug("Reservation {} not released, budget store unavailable", reservation.id());
 		}
+		notifySettled(new CallSettled(model, reservation.keys(), reservation.amount(), TokenUsage.ZERO, Amount.ZERO,
+				CallSettled.Outcome.RELEASED));
 	}
 
 	private static void requireOneLimitPerScopeAndWindow(List<Limit> limits) {
@@ -252,6 +297,29 @@ public class BudgetService {
 						+ " limit; put both caps in one limit");
 			}
 		}
+	}
+
+	/**
+	 * Reads where a subject stands against each limit of a scope in the current window. Changes
+	 * nothing and applies no failure mode.
+	 * @param subjectId ignored for {@link Scope#GLOBAL}, which has one shared budget
+	 * @return one status per limit of the scope, in configuration order; empty if the scope has none
+	 * @throws LedgerUnavailableException if the ledger can't be reached
+	 */
+	public List<BudgetStatus> statusOf(Scope scope, String subjectId) {
+		Objects.requireNonNull(scope, "scope can't be null");
+		Objects.requireNonNull(subjectId, "subjectId can't be null");
+		Instant now = this.clock.instant();
+
+		List<BudgetStatus> statuses = new ArrayList<>();
+		for (Limit limit : this.limits) {
+			if (limit.scope() == scope) {
+				BudgetKey key = BudgetKey.of(scope, subjectId, limit.window(), now, this.zone);
+				statuses.add(new BudgetStatus(limit, key.windowStart(), limit.window().endOf(now, this.zone),
+						this.ledger.current(key)));
+			}
+		}
+		return statuses;
 	}
 
 	private Map<BudgetKey, Limit> keysFor(Map<Scope, String> subjectIds, Instant now) {
@@ -308,6 +376,19 @@ public class BudgetService {
 		if (this.modelsWithoutUsage.add(model)) {
 			log.warn("Model '{}' reported no token usage, charging the estimate instead. "
 					+ "Enable usage reporting on the provider (for OpenAI streaming: stream usage).", model);
+		}
+	}
+
+	private void notifyDecision(DecisionMade.Stage stage, DecisionMade.Outcome outcome, @Nullable Scope scope) {
+		DecisionMade event = new DecisionMade(stage, outcome, scope);
+		for (BudgetListener listener : this.listeners) {
+			listener.onDecision(event);
+		}
+	}
+
+	private void notifySettled(CallSettled settled) {
+		for (BudgetListener listener : this.listeners) {
+			listener.onSettled(settled);
 		}
 	}
 }

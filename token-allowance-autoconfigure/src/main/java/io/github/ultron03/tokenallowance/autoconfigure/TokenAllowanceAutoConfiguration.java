@@ -4,10 +4,15 @@ import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 
+import io.micrometer.core.instrument.MeterRegistry;
 import org.jspecify.annotations.Nullable;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.ChatClientBuilderCustomizer;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.actuate.autoconfigure.endpoint.condition.ConditionalOnAvailableEndpoint;
+import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBooleanProperty;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -21,6 +26,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.util.ClassUtils;
 
 import io.github.ultron03.tokenallowance.autoconfigure.TokenAllowanceProperties.Pricing;
+import io.github.ultron03.tokenallowance.core.BudgetListener;
 import io.github.ultron03.tokenallowance.core.BudgetService;
 import io.github.ultron03.tokenallowance.core.ConfiguredPriceCatalog;
 import io.github.ultron03.tokenallowance.core.ConservativeTokenEstimator;
@@ -30,7 +36,9 @@ import io.github.ultron03.tokenallowance.core.TokenEstimator;
 import io.github.ultron03.tokenallowance.core.UsageLedger;
 import io.github.ultron03.tokenallowance.redis.RedisUsageLedger;
 import io.github.ultron03.tokenallowance.springai.advisor.AdmissionAdvisor;
+import io.github.ultron03.tokenallowance.springai.actuator.TokenAllowanceEndpoint;
 import io.github.ultron03.tokenallowance.springai.advisor.MeteringAdvisor;
+import io.github.ultron03.tokenallowance.springai.metrics.MicrometerBudgetListener;
 import io.github.ultron03.tokenallowance.springai.subject.AdvisorParamSubjectResolver;
 import io.github.ultron03.tokenallowance.springai.subject.CompositeSubjectResolver;
 import io.github.ultron03.tokenallowance.springai.subject.HeaderSubjectResolver;
@@ -46,7 +54,7 @@ import io.github.ultron03.tokenallowance.springai.web.BudgetExceededExceptionHan
  * steps aside for a bean named {@value #CUSTOMIZER_BEAN_NAME}. A {@code ChatClient} built by hand
  * with {@code ChatClient.builder(..)} gets no advisors; add the two advisor beans to it yourself.
  */
-@AutoConfiguration
+@AutoConfiguration(afterName = "org.springframework.boot.micrometer.metrics.autoconfigure.CompositeMeterRegistryAutoConfiguration")
 @ConditionalOnClass(ChatClient.class)
 @ConditionalOnBooleanProperty(prefix = TokenAllowanceProperties.PREFIX, name = "enabled", matchIfMissing = true)
 @EnableConfigurationProperties(TokenAllowanceProperties.class)
@@ -94,15 +102,15 @@ public class TokenAllowanceAutoConfiguration {
 		return new InMemoryUsageLedger(clock, properties.zone());
 	}
 
-	/** Applies the configured limits and per-request caps. */
+	/** Applies the configured limits and per-request caps, and tells every {@link BudgetListener} bean. */
 	@Bean
 	@ConditionalOnMissingBean
 	BudgetService budgetService(UsageLedger ledger, PriceCatalog priceCatalog, Clock clock,
-			TokenAllowanceProperties properties) {
+			TokenAllowanceProperties properties, ObjectProvider<BudgetListener> listeners) {
 		return new BudgetService(ledger, priceCatalog, PropertyMapping.limits(properties.limits()),
 				PropertyMapping.requestLimit(properties.perRequest()), properties.mode(),
 				PropertyMapping.failureMode(properties.store().failureMode(), properties.mode()), clock,
-				properties.zone());
+				properties.zone(), listeners.orderedStream().toList());
 	}
 
 	/**
@@ -178,6 +186,38 @@ public class TokenAllowanceAutoConfiguration {
 		@ConditionalOnMissingBean
 		BudgetExceededExceptionHandler budgetExceededExceptionHandler() {
 			return new BudgetExceededExceptionHandler();
+		}
+	}
+
+	/**
+	 * The meters, in their own class so an app without Micrometer never loads its types.
+	 */
+	@Configuration(proxyBeanMethods = false)
+	@ConditionalOnClass(MeterRegistry.class)
+	@ConditionalOnBean(MeterRegistry.class)
+	static class MetricsConfiguration {
+
+		/** Records decisions and charges as {@code token.allowance.*} meters. */
+		@Bean
+		@ConditionalOnMissingBean
+		MicrometerBudgetListener micrometerBudgetListener(MeterRegistry registry) {
+			return new MicrometerBudgetListener(registry);
+		}
+	}
+
+	/**
+	 * The actuator endpoint, in its own class so an app without Actuator never loads its types.
+	 */
+	@Configuration(proxyBeanMethods = false)
+	@ConditionalOnClass(Endpoint.class)
+	@ConditionalOnAvailableEndpoint(TokenAllowanceEndpoint.class)
+	static class EndpointConfiguration {
+
+		/** Shows current spend per subject; only reachable once the app exposes it. */
+		@Bean
+		@ConditionalOnMissingBean
+		TokenAllowanceEndpoint tokenAllowanceEndpoint(BudgetService budgetService) {
+			return new TokenAllowanceEndpoint(budgetService);
 		}
 	}
 }

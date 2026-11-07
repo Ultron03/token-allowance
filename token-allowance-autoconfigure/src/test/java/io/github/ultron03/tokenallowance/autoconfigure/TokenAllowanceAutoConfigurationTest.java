@@ -5,13 +5,18 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Clock;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.ChatClientBuilderCustomizer;
 import org.springframework.ai.chat.client.DefaultChatClient.DefaultChatClientRequestSpec;
+import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.context.annotation.ImportCandidates;
@@ -24,8 +29,10 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 
 import io.github.ultron03.tokenallowance.core.Amount;
 import io.github.ultron03.tokenallowance.core.BudgetKey;
+import io.github.ultron03.tokenallowance.core.BudgetListener;
 import io.github.ultron03.tokenallowance.core.BudgetService;
 import io.github.ultron03.tokenallowance.core.Decision;
+import io.github.ultron03.tokenallowance.core.DecisionMade;
 import io.github.ultron03.tokenallowance.core.InMemoryUsageLedger;
 import io.github.ultron03.tokenallowance.core.LedgerUnavailableException;
 import io.github.ultron03.tokenallowance.core.Limit;
@@ -37,8 +44,10 @@ import io.github.ultron03.tokenallowance.core.Spend;
 import io.github.ultron03.tokenallowance.core.TokenEstimator;
 import io.github.ultron03.tokenallowance.core.UsageLedger;
 import io.github.ultron03.tokenallowance.redis.RedisUsageLedger;
+import io.github.ultron03.tokenallowance.springai.actuator.TokenAllowanceEndpoint;
 import io.github.ultron03.tokenallowance.springai.advisor.AdmissionAdvisor;
 import io.github.ultron03.tokenallowance.springai.advisor.MeteringAdvisor;
+import io.github.ultron03.tokenallowance.springai.metrics.MicrometerBudgetListener;
 import io.github.ultron03.tokenallowance.springai.subject.SubjectResolver;
 import io.github.ultron03.tokenallowance.springai.web.BudgetExceededExceptionHandler;
 import jakarta.servlet.http.HttpServletRequest;
@@ -205,6 +214,79 @@ class TokenAllowanceAutoConfigurationTest {
 	void registersNoExceptionHandlerWhenTurnedOff() {
 		webRunner.withPropertyValues("token-allowance.web.exception-handler=false")
 			.run(context -> assertThat(context).doesNotHaveBean(BudgetExceededExceptionHandler.class));
+	}
+
+	@Test
+	void recordsDecisionsInMeterRegistry() {
+		runner.withBean(MeterRegistry.class, SimpleMeterRegistry::new).run(context -> {
+			assertThat(context).hasSingleBean(MicrometerBudgetListener.class);
+
+			context.getBean(BudgetService.class).admit(ALICE);
+
+			assertThat(context.getBean(MeterRegistry.class).find(MicrometerBudgetListener.DECISIONS).counter())
+				.isNotNull();
+		});
+	}
+
+	@Test
+	void registersNoMeterListenerWithoutMeterRegistry() {
+		runner.run(context -> assertThat(context).doesNotHaveBean(MicrometerBudgetListener.class));
+	}
+
+	@Test
+	void startsWithoutMicrometer() {
+		runner.withClassLoader(new FilteredClassLoader(MeterRegistry.class)).run(context -> {
+			assertThat(context).hasNotFailed();
+			assertThat(context).doesNotHaveBean(MicrometerBudgetListener.class);
+		});
+	}
+
+	@Test
+	void keepsUserMeterListener() {
+		MicrometerBudgetListener listener = new MicrometerBudgetListener(new SimpleMeterRegistry());
+
+		runner.withBean(MeterRegistry.class, SimpleMeterRegistry::new)
+			.withBean(MicrometerBudgetListener.class, () -> listener)
+			.run(context -> assertThat(context.getBean(MicrometerBudgetListener.class)).isSameAs(listener));
+	}
+
+	@Test
+	void passesUserListenerToBudgetService() {
+		List<DecisionMade> decisions = new ArrayList<>();
+		BudgetListener listener = new BudgetListener() {
+
+			@Override
+			public void onDecision(DecisionMade event) {
+				decisions.add(event);
+			}
+		};
+
+		runner.withBean(BudgetListener.class, () -> listener).run(context -> {
+			context.getBean(BudgetService.class).admit(ALICE);
+
+			assertThat(decisions).hasSize(1);
+		});
+	}
+
+	@Test
+	void registersEndpointWhenExposedOverWeb() {
+		runner.withPropertyValues("management.endpoints.web.exposure.include=" + TokenAllowanceEndpoint.ID)
+			.run(context -> assertThat(context).hasSingleBean(TokenAllowanceEndpoint.class));
+	}
+
+	@Test
+	void registersNoEndpointUnlessExposed() {
+		runner.run(context -> assertThat(context).doesNotHaveBean(TokenAllowanceEndpoint.class));
+	}
+
+	@Test
+	void startsWithoutActuator() {
+		runner.withClassLoader(new FilteredClassLoader(Endpoint.class))
+			.withPropertyValues("management.endpoints.web.exposure.include=" + TokenAllowanceEndpoint.ID)
+			.run(context -> {
+				assertThat(context).hasNotFailed();
+				assertThat(context).doesNotHaveBean(TokenAllowanceEndpoint.class);
+			});
 	}
 
 	@Test

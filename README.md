@@ -196,6 +196,59 @@ Set `spring.data.redis.timeout`. Without it, every call waits up to 60 seconds f
 
 With Spring Boot Actuator, Boot's own `redis` health indicator turns `/actuator/health` DOWN while Redis is unreachable, also in `fail-open` mode, where the app still serves calls. The Kubernetes liveness and readiness groups don't include it by default; leave it out of them if you fail open.
 
+## Metrics
+
+With Spring Boot Actuator, or any other `MeterRegistry` bean, Token Allowance records these meters:
+
+| Meter | Type | Tags | What it counts |
+|---|---|---|---|
+| `token.allowance.decisions` | counter | `stage` (`admission`, `request`, `reservation`), `outcome` (`allowed`, `denied`, `observed`, `ledger-unavailable`), `scope` (`user`, `tenant`, `session`, `global`, `none`) | Every admission and reservation, and every time a per-request cap is reached. `observed` means over budget but let through in `observe` mode. `scope` is the budget that ran out. |
+| `token.allowance.cost` | counter, USD | `model`, `charge` (`usage`, `estimate`) | Cost charged to budgets. `estimate` means the provider reported no usage. |
+| `token.allowance.tokens` | counter | `model`, `charge` | Tokens charged to budgets. |
+| `token.allowance.estimate.ratio` | distribution summary | `model` | Reported tokens divided by the estimate reserved before the call. Above 1 means the estimate was too low. |
+
+No meter is tagged with a user, tenant or session id. Turn them all off with `management.metrics.enable.token.allowance=false`.
+
+Spring AI already records the tokens each model call used (`gen_ai.client.token.usage`). `token.allowance.tokens` differs in that it counts what was charged, including estimates for calls without reported usage.
+
+To record the same events somewhere else, define a `BudgetListener` bean; it is called after every decision and every charged or released call.
+
+## Actuator endpoint
+
+With Spring Boot Actuator, the `tokenallowance` endpoint shows where a subject stands in the current windows. Like most endpoints, it is not exposed until you include it:
+
+```yaml
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,tokenallowance
+```
+
+`GET /actuator/tokenallowance/{scope}/{subjectId}`, for example `/actuator/tokenallowance/user/alice`:
+
+```json
+{
+  "scope": "user",
+  "subjectId": "alice",
+  "budgets": [
+    {
+      "window": "daily",
+      "windowStart": "2026-11-08T00:00:00Z",
+      "resetsAt": "2026-11-09T00:00:00Z",
+      "maxTokens": 100000,
+      "maxCost": 1.000000,
+      "committed": { "tokens": 4200, "cost": 0.012600 },
+      "reserved": { "tokens": 1500, "cost": 0.002000 }
+    }
+  ]
+}
+```
+
+There is one entry per limit configured for the scope. `committed` is what finished calls used; `reserved` is what calls still running hold. Costs are in US dollars. For the global budget, use any subject id, for example `/actuator/tokenallowance/global/all`. A scope without limits answers `404`.
+
+The endpoint shows any user's spend to whoever can reach it, so secure it like your other actuator endpoints.
+
 ## Replacing parts
 
 Every bean steps aside when your app defines one of the same type:

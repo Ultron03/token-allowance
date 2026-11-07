@@ -84,7 +84,7 @@ public class MeteringAdvisor implements CallAdvisor, StreamAdvisor {
 			response = chain.nextCall(request);
 		}
 		catch (Throwable ex) {
-			this.budgetService.release(call.reservation());
+			this.budgetService.release(call.reservation(), call.model());
 			throw ex;
 		}
 
@@ -202,7 +202,7 @@ public class MeteringAdvisor implements CallAdvisor, StreamAdvisor {
 		void onError(Throwable ex) {
 			if (!this.anyChunk.get()) {
 				if (claim()) {
-					MeteringAdvisor.this.budgetService.release(this.call.reservation());
+					MeteringAdvisor.this.budgetService.release(this.call.reservation(), this.call.model());
 				}
 				return;
 			}
@@ -224,7 +224,7 @@ public class MeteringAdvisor implements CallAdvisor, StreamAdvisor {
 			}
 			switch (MeteringAdvisor.this.interruptedStreamPolicy) {
 				case CHARGE_ESTIMATE -> charge(this.call, this.call.estimate());
-				case RELEASE -> MeteringAdvisor.this.budgetService.release(this.call.reservation());
+				case RELEASE -> MeteringAdvisor.this.budgetService.release(this.call.reservation(), this.call.model());
 			}
 		}
 

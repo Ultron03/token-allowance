@@ -458,3 +458,57 @@ count.
   applies. The README tells users to set it.
 - `store.type: redis` without the Redis module fails at startup because no `UsageLedger` bean
   exists.
+
+## 21. Metrics through a listener port (2026-11-08)
+
+**Context**
+Observe mode is only useful if users can see what would have been denied and how far the estimate
+is off. Core must stay free of Micrometer, and the planned audit event needs the same facts as the
+meters.
+
+**Decision**
+- Core gets a plain-Java `BudgetListener` with two events: `DecisionMade` (stage, outcome, scope of
+  the budget that ran out) and `CallSettled` (model, keys, estimate, reported usage, charge,
+  outcome). `BudgetService` calls every listener; Micrometer is one adapter, in the spring-ai
+  module.
+- Decisions carry a `stage` tag. Without it, an allowed admission and an allowed reservation would
+  land in one count. Per-request caps report only when reached, so a model call is not counted
+  twice.
+- Observe mode reports `observed`, not `allowed`, so the meters show what enforce mode would deny.
+- `release` takes the model, so a released call is reported like a charged one.
+- Listeners run on the caller's thread after the ledger work, and their exceptions are not caught.
+  A failing listener fails the request but can't leave a reservation open.
+- Tags are limited to model, stage, outcome, scope and charge. Subject ids stay in `CallSettled`
+  for audit listeners and never reach a tag.
+- The estimate ratio is recorded only when the provider reported usage; for an estimate charge it
+  would always be 1.
+
+**Consequence**
+- Any `BudgetListener` bean is called, so users can keep their own audit log without new API.
+- An interrupted stream charged its estimate counts as `usage` with ratio 1, pulling the ratio
+  slightly toward 1.
+- `token.allowance.tokens` overlaps Spring AI's `gen_ai.client.token.usage`; it differs by counting
+  charged estimates.
+
+## 22. Actuator endpoint for current spend (2026-11-08)
+
+**Context**
+Operators need to answer "why was alice denied, and when can she call again?" without reading
+Redis by hand.
+
+**Decision**
+- `GET /actuator/tokenallowance/{scope}/{subjectId}` returns one entry per limit of the scope:
+  window, window start, reset time, caps, and committed and reserved spend.
+- Which keys apply and when a window resets stays in core (`BudgetService.statusOf`); the endpoint
+  only formats the result.
+- Costs are dollar numbers with six decimals (`Money.toDollars()`), not micro-dollars, so they read
+  like the configured prices.
+- For the global scope the subject id is ignored, because there is one global budget.
+- A scope without limits answers 404. A ledger outage is not handled by the failure mode: the read
+  fails with 500, and Boot's `redis` health indicator already reports the outage.
+- No list of all subjects: in Redis it would need a key scan.
+- The endpoint is only registered when the app exposes it, like Boot's own endpoints.
+
+**Consequence**
+- Anyone who can reach the endpoint can read any subject's spend; apps secure it like other actuator
+  endpoints.
