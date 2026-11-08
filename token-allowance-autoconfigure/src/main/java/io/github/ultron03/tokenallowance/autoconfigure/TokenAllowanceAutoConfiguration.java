@@ -19,6 +19,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.ResourceLoader;
@@ -38,6 +39,7 @@ import io.github.ultron03.tokenallowance.redis.RedisUsageLedger;
 import io.github.ultron03.tokenallowance.springai.advisor.AdmissionAdvisor;
 import io.github.ultron03.tokenallowance.springai.actuator.TokenAllowanceEndpoint;
 import io.github.ultron03.tokenallowance.springai.advisor.MeteringAdvisor;
+import io.github.ultron03.tokenallowance.springai.event.ApplicationEventBudgetListener;
 import io.github.ultron03.tokenallowance.springai.metrics.MicrometerBudgetListener;
 import io.github.ultron03.tokenallowance.springai.subject.AdvisorParamSubjectResolver;
 import io.github.ultron03.tokenallowance.springai.subject.CompositeSubjectResolver;
@@ -110,7 +112,7 @@ public class TokenAllowanceAutoConfiguration {
 		return new BudgetService(ledger, priceCatalog, PropertyMapping.limits(properties.limits()),
 				PropertyMapping.requestLimit(properties.perRequest()), properties.mode(),
 				PropertyMapping.failureMode(properties.store().failureMode(), properties.mode()), clock,
-				properties.zone(), listeners.orderedStream().toList());
+				properties.zone(), properties.thresholds(), listeners.orderedStream().toList());
 	}
 
 	/**
@@ -154,6 +156,13 @@ public class TokenAllowanceAutoConfiguration {
 	ChatClientBuilderCustomizer tokenAllowanceChatClientBuilderCustomizer(AdmissionAdvisor admissionAdvisor,
 			MeteringAdvisor meteringAdvisor) {
 		return builder -> builder.defaultAdvisors(admissionAdvisor, meteringAdvisor);
+	}
+
+	/** Publishes threshold events to the application context. */
+	@Bean
+	@ConditionalOnMissingBean
+	ApplicationEventBudgetListener applicationEventBudgetListener(ApplicationEventPublisher publisher) {
+		return new ApplicationEventBudgetListener(publisher);
 	}
 
 	/**

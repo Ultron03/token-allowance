@@ -14,4 +14,8 @@ public interface BudgetListener {
 	/** Called once per model call, when it is charged or released. */
 	default void onSettled(CallSettled event) {
 	}
+
+	/** Called once per subject, window and threshold, by the call that took committed spend to it. */
+	default void onThresholdReached(BudgetThresholdReached event) {
+	}
 }

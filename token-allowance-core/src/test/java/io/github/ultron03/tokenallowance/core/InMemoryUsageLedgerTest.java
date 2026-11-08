@@ -106,6 +106,25 @@ class InMemoryUsageLedgerTest {
 	}
 
 	@Test
+	void commitReturnsCommittedSpendOfEveryKey() {
+		this.ledger.commit(reserve(amount(50, "0.50")), amount(20, "0.20"));
+		Reservation reservation = reserveOn(Map.of(USER_KEY, USER_LIMIT, GLOBAL_KEY, GLOBAL_LIMIT), amount(10, "0.10"));
+
+		Map<BudgetKey, Amount> committed = this.ledger.commit(reservation, amount(30, "0.30"));
+
+		assertThat(committed).containsOnly(Map.entry(USER_KEY, amount(50, "0.50")),
+				Map.entry(GLOBAL_KEY, amount(30, "0.30")));
+	}
+
+	@Test
+	void commitOfSettledReservationReturnsNothing() {
+		Reservation reservation = reserve(amount(50, "0.50"));
+		this.ledger.commit(reservation, amount(30, "0.30"));
+
+		assertThat(this.ledger.commit(reservation, amount(30, "0.30"))).isEmpty();
+	}
+
+	@Test
 	void committedSpendCountsAgainstLaterReservations() {
 		this.ledger.commit(reserve(amount(50, "0.50")), amount(80, "0.80"));
 

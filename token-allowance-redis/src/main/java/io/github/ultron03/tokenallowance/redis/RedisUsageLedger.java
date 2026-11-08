@@ -2,6 +2,7 @@ package io.github.ultron03.tokenallowance.redis;
 
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -38,13 +39,12 @@ public final class RedisUsageLedger implements UsageLedger {
 
 	private static final Logger log = LoggerFactory.getLogger(RedisUsageLedger.class);
 
-	private static final RedisScript<Long> SETTLE = RedisScript
-		.of(new ClassPathResource("settle.lua", RedisUsageLedger.class), Long.class);
+	@SuppressWarnings("rawtypes")
+	private static final RedisScript<List> SETTLE = RedisScript
+		.of(new ClassPathResource("settle.lua", RedisUsageLedger.class), List.class);
 
 	private static final RedisScript<Long> RESERVE = RedisScript
 		.of(new ClassPathResource("reserve.lua", RedisUsageLedger.class), Long.class);
-
-	private static final long NOT_SETTLED = 0;
 
 	private static final long RESERVED = 0;
 
@@ -90,9 +90,9 @@ public final class RedisUsageLedger implements UsageLedger {
 	}
 
 	@Override
-	public void commit(Reservation reservation, Amount actual) {
+	public Map<BudgetKey, Amount> commit(Reservation reservation, Amount actual) {
 		Objects.requireNonNull(actual, "actual can't be null");
-		settle(reservation, actual);
+		return settle(reservation, actual);
 	}
 
 	@Override
@@ -161,9 +161,11 @@ public final class RedisUsageLedger implements UsageLedger {
 		return maxCost == null ? NO_CAP : String.valueOf(maxCost.micros());
 	}
 
-	private void settle(Reservation reservation, Amount charged) {
+	private Map<BudgetKey, Amount> settle(Reservation reservation, Amount charged) {
 		Objects.requireNonNull(reservation, "reservation can't be null");
 
+		// Iterated twice below, so both loops must see the keys in one fixed order.
+		List<BudgetKey> budgetKeys = new ArrayList<>(reservation.keys());
 		List<String> keys = new ArrayList<>();
 		keys.add(RedisKeys.reservation(reservation.id()));
 
@@ -174,21 +176,31 @@ public final class RedisUsageLedger implements UsageLedger {
 		args.add(String.valueOf(charged.cost().micros()));
 
 		// One loop for both lists, so the script finds each key's expiry at the same position.
-		for (BudgetKey key : reservation.keys()) {
+		for (BudgetKey key : budgetKeys) {
 			keys.add(RedisKeys.budget(key));
 			args.add(expiryOf(key));
 		}
 
-		Long settled;
+		@Nullable List<?> committed;
 		try {
-			settled = this.redis.execute(SETTLE, keys, args.toArray());
+			committed = this.redis.execute(SETTLE, keys, args.toArray());
 		}
 		catch (DataAccessResourceFailureException | QueryTimeoutException ex) {
 			throw new LedgerUnavailableException(UNAVAILABLE, ex);
 		}
-		if (settled == null || settled == NOT_SETTLED) {
+		if (committed == null || committed.isEmpty()) {
 			log.debug("Reservation {} was already settled or has expired", reservation.id());
+			return Map.of();
 		}
+
+		// The script returns tokens and micros per key, in the order of budgetKeys.
+		Map<BudgetKey, Amount> committedByKey = new HashMap<>();
+		for (int i = 0; i < budgetKeys.size(); i++) {
+			long tokens = (Long) committed.get(2 * i);
+			long micros = (Long) committed.get(2 * i + 1);
+			committedByKey.put(budgetKeys.get(i), new Amount(tokens, new Money(micros)));
+		}
+		return Map.copyOf(committedByKey);
 	}
 
 	private String expiryOf(BudgetKey key) {

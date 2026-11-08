@@ -158,6 +158,7 @@ All properties start with `token-allowance.`. Amounts are in dollars; write them
 | `web.exception-handler` | `true` | Answers a used-up budget with 429 and an unreachable budget store with 503. Turn it off to handle `BudgetExceededException` and `LedgerUnavailableException` yourself. |
 | `store.type` | `in-memory` | `in-memory` keeps spend in each instance; `redis` shares it across instances (see below). |
 | `store.failure-mode` | `auto` | What happens to new calls while Redis can't be reached: `fail-open`, `fail-closed`, or `auto` (open in `observe` mode, closed in `enforce` mode). |
+| `thresholds` | `80,100` | Percents of each limit at which a `BudgetThresholdReached` event is published, each from 1 to 100 (see [Budget alerts](#budget-alerts)). |
 
 The app fails at startup on an invalid setting, such as a price with more than six decimal places. That is almost always a per-token price where a per-million price was meant.
 
@@ -249,6 +250,30 @@ There is one entry per limit configured for the scope. `committed` is what finis
 
 The endpoint shows any user's spend to whoever can reach it, so secure it like your other actuator endpoints.
 
+## Budget alerts
+
+When a call takes a subject's committed spend to 80% or 100% of a limit (see `thresholds`), Token Allowance publishes a `BudgetThresholdReached` application event:
+
+```java
+@Component
+class BudgetAlerts {
+
+	@Async
+	@EventListener
+	void onThresholdReached(BudgetThresholdReached event) {
+		if (event.percent() == 100) {
+			// event.key().subjectId() has used up event.limit() until event.resetsAt()
+		}
+	}
+}
+```
+
+Each threshold fires once per subject and window, from the call that crossed it, even with several instances sharing Redis. A call that jumps past several thresholds publishes one event for each, lowest first. Only charged calls count, not calls still in flight. Events are also published in `observe` mode, so `100` shows who would have been denied. While the budget store can't be reached, nothing is recorded and no event is published.
+
+Event listeners run on the thread of the chat call, after it has been charged. Use `@Async` (with `@EnableAsync`) for anything slow, such as sending an email. An exception from a listener is logged and does not fail the chat call.
+
+The event holds the subject id, so don't use it as a metric tag.
+
 ## Replacing parts
 
 Every bean steps aside when your app defines one of the same type:
@@ -257,7 +282,7 @@ Every bean steps aside when your app defines one of the same type:
 |---|---|
 | `TokenEstimator` | Count tokens exactly with your model's tokenizer. |
 | `PriceCatalog` | Load prices from somewhere other than properties. |
-| `UsageLedger` | Store spend somewhere other than memory or Redis. Throw `LedgerUnavailableException` when your store can't be reached, so the failure mode applies. |
+| `UsageLedger` | Store spend somewhere other than memory or Redis. Throw `LedgerUnavailableException` when your store can't be reached, so the failure mode applies. `commit` returns each budget's committed spend after the charge, read in the same atomic step, so budget alerts fire exactly once. |
 | `SubjectResolver` | Find the user, tenant or session your own way. |
 | `Clock` | Control time in tests. |
 

@@ -527,7 +527,7 @@ class BudgetServiceTest {
 	void notifiesRequestCapOnlyWhenReached() {
 		BudgetService service = new BudgetService(this.ledger, rejectingCatalog(), List.of(USER_DAILY),
 				new RequestLimit(3, null), EnforcementMode.ENFORCE, LedgerFailureMode.FAIL_CLOSED, this.clock,
-				ZoneOffset.UTC, List.of(this.listener));
+				ZoneOffset.UTC, List.of(), List.of(this.listener));
 
 		service.checkRequest(2, Money.ZERO);
 		service.checkRequest(3, Money.ZERO);
@@ -607,6 +607,90 @@ class BudgetServiceTest {
 	}
 
 	@Test
+	void notifiesWhenCallTakesSpendToThreshold() {
+		BudgetService service = alerting(List.of(80), EnforcementMode.ENFORCE, this.ledger);
+		Reservation reservation = reservationOf(service.reserve(ALICE, MODEL, ESTIMATE));
+
+		// 1,600 of 2,000 tokens is 80%; 1,100 input at $1/MTok plus 500 output at $2/MTok is $0.0021.
+		service.settle(reservation, MODEL, new TokenUsage(1100, 500, 0, 0));
+
+		assertThat(this.listener.thresholds).containsExactly(new BudgetThresholdReached(ALICE_TODAY, USER_DAILY, 80,
+				new Amount(1600, Money.ofDollars("0.0021")), Instant.parse("2026-10-23T00:00:00Z")));
+	}
+
+	@Test
+	void notifiesOnlyTheCallThatCrossesThreshold() {
+		BudgetService service = alerting(List.of(80), EnforcementMode.ENFORCE, this.ledger);
+
+		charge(service, 1000);
+		charge(service, 600);
+		charge(service, 200);
+
+		assertThat(this.listener.thresholds).singleElement()
+			.extracting(reached -> reached.committed().tokens())
+			.isEqualTo(1600L);
+	}
+
+	@Test
+	void notifiesAgainInNextWindow() {
+		BudgetService service = alerting(List.of(80), EnforcementMode.ENFORCE, this.ledger);
+
+		charge(service, 1600);
+		this.clock.advance(Duration.ofDays(1));
+		charge(service, 1600);
+
+		assertThat(this.listener.thresholds).extracting(reached -> reached.key().windowStart())
+			.containsExactly(Instant.parse("2026-10-22T00:00:00Z"), Instant.parse("2026-10-23T00:00:00Z"));
+	}
+
+	@Test
+	void notifiesEveryThresholdOneCallPassesInAscendingOrder() {
+		BudgetService service = alerting(List.of(100, 80), EnforcementMode.ENFORCE, this.ledger);
+
+		charge(service, 2000);
+
+		assertThat(this.listener.thresholds).extracting(BudgetThresholdReached::percent).containsExactly(80, 100);
+	}
+
+	@Test
+	void notifiesThresholdsPassedInObserveMode() {
+		BudgetService service = alerting(List.of(80, 100), EnforcementMode.OBSERVE, this.ledger);
+
+		charge(service, 1500);
+		charge(service, 1500);
+
+		assertThat(this.listener.thresholds).extracting(BudgetThresholdReached::percent).containsExactly(80, 100);
+	}
+
+	@Test
+	void noThresholdEventWhenLedgerUnavailable() {
+		BudgetService service = alerting(List.of(80), EnforcementMode.ENFORCE, new UnavailableLedger());
+		Reservation reservation = new Reservation("r1", Set.of(ALICE_TODAY), ESTIMATE_AMOUNT);
+
+		service.settle(reservation, MODEL, new TokenUsage(1600, 0, 0, 0));
+
+		assertThat(this.listener.thresholds).isEmpty();
+	}
+
+	@Test
+	void noThresholdEventWhenSettledTwice() {
+		BudgetService service = alerting(List.of(80), EnforcementMode.ENFORCE, this.ledger);
+		Reservation reservation = reservationOf(service.reserve(ALICE, MODEL, ESTIMATE));
+
+		service.settle(reservation, MODEL, new TokenUsage(1600, 0, 0, 0));
+		service.settle(reservation, MODEL, new TokenUsage(1600, 0, 0, 0));
+
+		assertThat(this.listener.thresholds).hasSize(1);
+	}
+
+	@Test
+	void rejectsThresholdAbove100() {
+		assertThatThrownBy(() -> alerting(List.of(101), EnforcementMode.ENFORCE, this.ledger))
+			.isInstanceOf(IllegalArgumentException.class)
+			.hasMessageContaining("101");
+	}
+
+	@Test
 	void statusShowsCommittedAndReservedSpendWithResetTime() {
 		BudgetService service = service(EnforcementMode.ENFORCE, USER_DAILY);
 		service.settle(reservationOf(service.reserve(ALICE, MODEL, ESTIMATE)), MODEL, new TokenUsage(800, 200, 0, 0));
@@ -650,7 +734,18 @@ class BudgetServiceTest {
 
 	private BudgetService listened(EnforcementMode mode, UsageLedger usageLedger, LedgerFailureMode failureMode) {
 		return new BudgetService(usageLedger, rejectingCatalog(), List.of(USER_DAILY), RequestLimit.NONE, mode,
-				failureMode, this.clock, ZoneOffset.UTC, List.of(this.listener));
+				failureMode, this.clock, ZoneOffset.UTC, List.of(), List.of(this.listener));
+	}
+
+	private BudgetService alerting(List<Integer> thresholds, EnforcementMode mode, UsageLedger usageLedger) {
+		return new BudgetService(usageLedger, rejectingCatalog(), List.of(USER_DAILY), RequestLimit.NONE, mode,
+				LedgerFailureMode.FAIL_OPEN, this.clock, ZoneOffset.UTC, thresholds, List.of(this.listener));
+	}
+
+	/** Reserves and charges a call of {@code inputTokens} input tokens for alice. */
+	private static void charge(BudgetService service, long inputTokens) {
+		TokenUsage usage = new TokenUsage(inputTokens, 0, 0, 0);
+		service.settle(reservationOf(service.reserve(ALICE, MODEL, usage)), MODEL, usage);
 	}
 
 	private BudgetService requestCapped(EnforcementMode mode) {
@@ -691,7 +786,7 @@ class BudgetServiceTest {
 		}
 
 		@Override
-		public void commit(Reservation reservation, Amount actual) {
+		public Map<BudgetKey, Amount> commit(Reservation reservation, Amount actual) {
 			throw down();
 		}
 
@@ -716,6 +811,8 @@ class BudgetServiceTest {
 
 		private final List<CallSettled> settled = new ArrayList<>();
 
+		private final List<BudgetThresholdReached> thresholds = new ArrayList<>();
+
 		@Override
 		public void onDecision(DecisionMade event) {
 			this.decisions.add(event);
@@ -724,6 +821,11 @@ class BudgetServiceTest {
 		@Override
 		public void onSettled(CallSettled event) {
 			this.settled.add(event);
+		}
+
+		@Override
+		public void onThresholdReached(BudgetThresholdReached event) {
+			this.thresholds.add(event);
 		}
 	}
 }

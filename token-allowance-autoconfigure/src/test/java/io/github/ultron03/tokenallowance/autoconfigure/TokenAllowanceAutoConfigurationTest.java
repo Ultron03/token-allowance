@@ -24,6 +24,7 @@ import org.springframework.boot.context.properties.bind.validation.BindValidatio
 import org.springframework.boot.test.context.FilteredClassLoader;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.boot.test.context.runner.WebApplicationContextRunner;
+import org.springframework.context.event.EventListener;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
@@ -31,6 +32,7 @@ import io.github.ultron03.tokenallowance.core.Amount;
 import io.github.ultron03.tokenallowance.core.BudgetKey;
 import io.github.ultron03.tokenallowance.core.BudgetListener;
 import io.github.ultron03.tokenallowance.core.BudgetService;
+import io.github.ultron03.tokenallowance.core.BudgetThresholdReached;
 import io.github.ultron03.tokenallowance.core.Decision;
 import io.github.ultron03.tokenallowance.core.DecisionMade;
 import io.github.ultron03.tokenallowance.core.InMemoryUsageLedger;
@@ -42,6 +44,7 @@ import io.github.ultron03.tokenallowance.core.ReservationResult;
 import io.github.ultron03.tokenallowance.core.Scope;
 import io.github.ultron03.tokenallowance.core.Spend;
 import io.github.ultron03.tokenallowance.core.TokenEstimator;
+import io.github.ultron03.tokenallowance.core.TokenUsage;
 import io.github.ultron03.tokenallowance.core.UsageLedger;
 import io.github.ultron03.tokenallowance.redis.RedisUsageLedger;
 import io.github.ultron03.tokenallowance.springai.actuator.TokenAllowanceEndpoint;
@@ -229,6 +232,31 @@ class TokenAllowanceAutoConfigurationTest {
 	}
 
 	@Test
+	void publishesReachedThresholdToEventListeners() {
+		runner.withUserConfiguration(ThresholdRecorder.class)
+			.withPropertyValues(USER_DAILY_LIMIT)
+			.withPropertyValues("token-allowance.pricing.unknown-model=allow-uncosted")
+			.run(context -> {
+				BudgetService service = context.getBean(BudgetService.class);
+				TokenUsage usage = new TokenUsage(800, 0, 0, 0);
+				Decision decision = service.reserve(ALICE, "any-model", usage);
+				service.settle(((Decision.Reserved) decision).reservation(), "any-model", usage);
+
+				assertThat(context.getBean(ThresholdRecorder.class).reached)
+					.extracting(BudgetThresholdReached::percent)
+					.containsExactly(80);
+			});
+	}
+
+	@Test
+	void failsStartupForThresholdAbove100() {
+		runner.withPropertyValues("token-allowance.thresholds=80,101").run(context -> {
+			assertThat(context).hasFailed();
+			assertThat(context.getStartupFailure()).hasRootCauseInstanceOf(BindValidationException.class);
+		});
+	}
+
+	@Test
 	void registersNoMeterListenerWithoutMeterRegistry() {
 		runner.run(context -> assertThat(context).doesNotHaveBean(MicrometerBudgetListener.class));
 	}
@@ -309,6 +337,16 @@ class TokenAllowanceAutoConfigurationTest {
 			});
 	}
 
+	static class ThresholdRecorder {
+
+		private final List<BudgetThresholdReached> reached = new ArrayList<>();
+
+		@EventListener
+		void on(BudgetThresholdReached event) {
+			this.reached.add(event);
+		}
+	}
+
 	private static final class UnavailableLedger implements UsageLedger {
 
 		@Override
@@ -322,7 +360,7 @@ class TokenAllowanceAutoConfigurationTest {
 		}
 
 		@Override
-		public void commit(Reservation reservation, Amount actual) {
+		public Map<BudgetKey, Amount> commit(Reservation reservation, Amount actual) {
 			throw down();
 		}
 

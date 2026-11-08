@@ -28,8 +28,10 @@ public interface UsageLedger {
 	/**
 	 * Replaces the reservation with the actual amount. Never denied, because the call already
 	 * happened; does nothing if the reservation is already settled.
+	 * @return the committed spend of each key right after this charge, read atomically with it;
+	 *         empty if the reservation was already settled
 	 */
-	void commit(Reservation reservation, Amount actual);
+	Map<BudgetKey, Amount> commit(Reservation reservation, Amount actual);
 
 	/** Drops the reservation without charging; does nothing if it is already settled. */
 	void release(Reservation reservation);

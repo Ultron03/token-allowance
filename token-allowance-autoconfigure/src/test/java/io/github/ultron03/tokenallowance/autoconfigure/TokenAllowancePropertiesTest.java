@@ -52,6 +52,7 @@ class TokenAllowancePropertiesTest {
 		assertThat(properties.web().exceptionHandler()).isTrue();
 		assertThat(properties.store().type()).isEqualTo(TokenAllowanceProperties.StoreType.IN_MEMORY);
 		assertThat(properties.store().failureMode()).isEqualTo(TokenAllowanceProperties.StoreFailureMode.AUTO);
+		assertThat(properties.thresholds()).containsExactly(80, 100);
 	}
 
 	@Test

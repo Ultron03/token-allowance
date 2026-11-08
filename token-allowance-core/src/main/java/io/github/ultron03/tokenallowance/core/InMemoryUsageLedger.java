@@ -80,9 +80,9 @@ public class InMemoryUsageLedger implements UsageLedger {
 	}
 
 	@Override
-	public void commit(Reservation reservation, Amount actual) {
+	public Map<BudgetKey, Amount> commit(Reservation reservation, Amount actual) {
 		Objects.requireNonNull(actual, "actual can't be null");
-		settle(reservation, actual);
+		return settle(reservation, actual);
 	}
 
 	@Override
@@ -116,12 +116,12 @@ public class InMemoryUsageLedger implements UsageLedger {
 		return reservation;
 	}
 
-	private void settle(Reservation reservation, Amount charged) {
+	private Map<BudgetKey, Amount> settle(Reservation reservation, Amount charged) {
 		Objects.requireNonNull(reservation, "reservation can't be null");
 		synchronized (this.lock) {
 			@Nullable Reservation open = this.openReservations.get(reservation.id());
 			if (open == null) {
-				return;
+				return Map.of();
 			}
 
 			// Compute every counter first, so an overflow leaves the ledger unchanged.
@@ -131,6 +131,12 @@ public class InMemoryUsageLedger implements UsageLedger {
 			}
 			this.spendByKey.putAll(settled);
 			this.openReservations.remove(open.id());
+
+			Map<BudgetKey, Amount> committed = new HashMap<>();
+			for (Map.Entry<BudgetKey, Spend> entry : settled.entrySet()) {
+				committed.put(entry.getKey(), entry.getValue().committed());
+			}
+			return Map.copyOf(committed);
 		}
 	}
 

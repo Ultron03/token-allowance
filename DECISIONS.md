@@ -512,3 +512,33 @@ Redis by hand.
 **Consequence**
 - Anyone who can reach the endpoint can read any subject's spend; apps secure it like other actuator
   endpoints.
+
+## 23. Budget threshold events (2026-11-08)
+
+**Context**
+Meters show totals and the actuator endpoint answers only when asked. Apps also want to act the
+moment a user nears a budget: warn them, or tell an operator before requests start failing.
+
+**Decision**
+- `BudgetService` checks, after each charge, whether the call moved a budget's committed spend from
+  below a threshold to at or above it, and tells `BudgetListener.onThresholdReached`. Reserved
+  estimates don't count, as in admission.
+- Thresholds are percents from 1 to 100, `80,100` by default, applied to every limit. A threshold
+  is reached when either cap is at it, compared in whole numbers (`used * 100 >= cap * percent`).
+  A call passing several thresholds reports each, lowest first.
+- `UsageLedger.commit` returns each key's committed spend after the charge, read atomically with
+  it (under the lock in memory, from `HINCRBY` in the Redis script). Commits on one key are
+  serialised, so exactly one call crosses each threshold, across instances, with no "already sent"
+  state; a new window is a new key and starts over. Reading `current()` after `commit` was
+  rejected: two concurrent commits on the global budget could both report the crossing, or
+  neither.
+- The core record `BudgetThresholdReached` is published as the application event as it is, with
+  no Spring copy of it. `ApplicationEventBudgetListener` catches exceptions from event listeners
+  and logs them, because the call has already been charged.
+- Events also fire in observe mode. During a ledger outage the charge is lost, so no event fires.
+
+**Consequence**
+- Custom `UsageLedger` implementations must return the committed totals from `commit` (breaking
+  change in 0.3.0).
+- Event listeners run on the chat thread; slow work needs `@Async`.
+- The event holds the subject id, so it is for alerts and audit logs, never metric tags.

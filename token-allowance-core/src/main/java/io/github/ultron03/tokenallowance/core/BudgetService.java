@@ -12,6 +12,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -48,6 +49,10 @@ public class BudgetService {
 
 	private final AtomicBoolean ledgerDown;
 
+	private static final int MIN_THRESHOLD = 1;
+
+	private final List<Integer> thresholds;
+
 	private final List<BudgetListener> listeners;
 
 	/**
@@ -62,7 +67,7 @@ public class BudgetService {
 	}
 
 	/**
-	 * Creates the service without listeners.
+	 * Creates the service without thresholds or listeners.
 	 * @param limits the configured limits; at most one per scope and window
 	 * @param requestLimit the caps on each single request
 	 * @param failureMode what happens to new calls while the ledger can't be reached
@@ -71,7 +76,7 @@ public class BudgetService {
 	 */
 	public BudgetService(UsageLedger ledger, PriceCatalog priceCatalog, List<Limit> limits, RequestLimit requestLimit,
 			EnforcementMode mode, LedgerFailureMode failureMode, Clock clock, ZoneId zone) {
-		this(ledger, priceCatalog, limits, requestLimit, mode, failureMode, clock, zone, List.of());
+		this(ledger, priceCatalog, limits, requestLimit, mode, failureMode, clock, zone, List.of(), List.of());
 	}
 
 	/**
@@ -80,12 +85,13 @@ public class BudgetService {
 	 * @param requestLimit the caps on each single request
 	 * @param failureMode what happens to new calls while the ledger can't be reached
 	 * @param zone the zone windows start in
-	 * @param listeners told about every decision and settled call, in this order
-	 * @throws IllegalArgumentException if two limits share a scope and window
+	 * @param thresholds percents of a limit at which listeners are told, each 1 to 100
+	 * @param listeners told about every decision, settled call and reached threshold, in this order
+	 * @throws IllegalArgumentException if two limits share a scope and window, or a threshold is out of range
 	 */
 	public BudgetService(UsageLedger ledger, PriceCatalog priceCatalog, List<Limit> limits, RequestLimit requestLimit,
 			EnforcementMode mode, LedgerFailureMode failureMode, Clock clock, ZoneId zone,
-			List<BudgetListener> listeners) {
+			List<Integer> thresholds, List<BudgetListener> listeners) {
 		Objects.requireNonNull(ledger, "ledger can't be null");
 		Objects.requireNonNull(priceCatalog, "priceCatalog can't be null");
 		Objects.requireNonNull(limits, "limits can't be null");
@@ -94,8 +100,10 @@ public class BudgetService {
 		Objects.requireNonNull(failureMode, "failureMode can't be null");
 		Objects.requireNonNull(clock, "clock can't be null");
 		Objects.requireNonNull(zone, "zone can't be null");
+		Objects.requireNonNull(thresholds, "thresholds can't be null");
 		Objects.requireNonNull(listeners, "listeners can't be null");
 		requireOneLimitPerScopeAndWindow(limits);
+		requireValidThresholds(thresholds);
 
 		this.ledger = ledger;
 		this.priceCatalog = priceCatalog;
@@ -107,6 +115,7 @@ public class BudgetService {
 		this.zone = zone;
 		this.modelsWithoutUsage = ConcurrentHashMap.newKeySet();
 		this.ledgerDown = new AtomicBoolean(false);
+		this.thresholds = List.copyOf(new TreeSet<>(thresholds));
 		this.listeners = List.copyOf(listeners);
 	}
 
@@ -256,8 +265,10 @@ public class BudgetService {
 		else {
 			charged = new Amount(actual.total(), costOf(model, actual));
 		}
+
+		Map<BudgetKey, Amount> committedAfter = Map.of();
 		try {
-			this.ledger.commit(reservation, charged);
+			committedAfter = this.ledger.commit(reservation, charged);
 			markLedgerUp();
 		}
 		catch (LedgerUnavailableException ex) {
@@ -267,6 +278,7 @@ public class BudgetService {
 		CallSettled.Outcome outcome = actual.isZero() ? CallSettled.Outcome.ESTIMATE_CHARGED
 				: CallSettled.Outcome.CHARGED;
 		notifySettled(new CallSettled(model, reservation.keys(), reservation.amount(), actual, charged, outcome));
+		notifyThresholdsReached(committedAfter, charged);
 		return charged;
 	}
 
@@ -389,6 +401,46 @@ public class BudgetService {
 	private void notifySettled(CallSettled settled) {
 		for (BudgetListener listener : this.listeners) {
 			listener.onSettled(settled);
+		}
+	}
+
+	private static void requireValidThresholds(List<Integer> thresholds) {
+		for (int threshold : thresholds) {
+			if (threshold < MIN_THRESHOLD || threshold > Limit.FULL_PERCENT) {
+				throw new IllegalArgumentException("Threshold " + threshold + " must be between " + MIN_THRESHOLD
+						+ " and " + Limit.FULL_PERCENT);
+			}
+		}
+	}
+
+	private @Nullable Limit limitFor(BudgetKey key) {
+		for (Limit limit : this.limits) {
+			if (limit.appliesTo(key)) {
+				return limit;
+			}
+		}
+		return null;
+	}
+
+	/** Tells listeners about each threshold this charge crossed; commits on one key are serialised, so only one call crosses it. */
+	private void notifyThresholdsReached(Map<BudgetKey, Amount> committedAfter, Amount charged) {
+		for (Map.Entry<BudgetKey, Amount> entry : committedAfter.entrySet()) {
+			BudgetKey key = entry.getKey();
+			Amount after = entry.getValue();
+			@Nullable Limit limit = limitFor(key);
+			if (limit == null) {
+				continue;
+			}
+			Amount before = after.minus(charged);
+			Instant resetsAt = key.window().endOf(key.windowStart(), this.zone);
+			for (int percent : this.thresholds) {
+				if (!limit.reachesPercent(before, percent) && limit.reachesPercent(after, percent)) {
+					BudgetThresholdReached event = new BudgetThresholdReached(key, limit, percent, after, resetsAt);
+					for (BudgetListener listener : this.listeners) {
+						listener.onThresholdReached(event);
+					}
+				}
+			}
 		}
 	}
 }

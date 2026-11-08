@@ -113,6 +113,21 @@ class LimitTest {
 	}
 
 	@Test
+	void reachesPercentWhenEitherCapIsAtIt() {
+		Limit limit = new Limit(Scope.USER, Window.DAILY, 2000L, Money.ofDollars("1.00"));
+
+		assertThat(limit.reachesPercent(new Amount(1600, Money.ZERO), 80)).isTrue();
+		assertThat(limit.reachesPercent(new Amount(0, Money.ofDollars("0.80")), 80)).isTrue();
+	}
+
+	@Test
+	void doesNotReachPercentJustBelowIt() {
+		Limit limit = new Limit(Scope.USER, Window.DAILY, 2000L, Money.ofDollars("1.00"));
+
+		assertThat(limit.reachesPercent(new Amount(1599, Money.ofDollars("0.799999")), 80)).isFalse();
+	}
+
+	@Test
 	void appliesOnlyToKeyWithSameScopeAndWindow() {
 		Limit limit = new Limit(Scope.USER, Window.DAILY, 100L, null);
 		Instant now = Instant.parse("2026-10-22T10:00:00Z");
