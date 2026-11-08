@@ -16,7 +16,12 @@ import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.ChatClientBuilderCustomizer;
 import org.springframework.ai.chat.client.DefaultChatClient.DefaultChatClientRequestSpec;
+import org.springframework.boot.actuate.autoconfigure.endpoint.EndpointAutoConfiguration;
+import org.springframework.boot.actuate.autoconfigure.endpoint.web.WebEndpointAutoConfiguration;
+import org.springframework.boot.actuate.endpoint.EndpointId;
 import org.springframework.boot.actuate.endpoint.annotation.Endpoint;
+import org.springframework.boot.actuate.endpoint.web.ExposableWebEndpoint;
+import org.springframework.boot.actuate.endpoint.web.WebEndpointsSupplier;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.context.annotation.ImportCandidates;
@@ -33,6 +38,7 @@ import io.github.ultron03.tokenallowance.core.BudgetKey;
 import io.github.ultron03.tokenallowance.core.BudgetListener;
 import io.github.ultron03.tokenallowance.core.BudgetService;
 import io.github.ultron03.tokenallowance.core.BudgetThresholdReached;
+import io.github.ultron03.tokenallowance.core.CallSettled;
 import io.github.ultron03.tokenallowance.core.Decision;
 import io.github.ultron03.tokenallowance.core.DecisionMade;
 import io.github.ultron03.tokenallowance.core.InMemoryUsageLedger;
@@ -63,6 +69,8 @@ class TokenAllowanceAutoConfigurationTest {
 			"token-allowance.limits[0].window=daily", "token-allowance.limits[0].max-tokens=1000" };
 
 	private static final Map<Scope, String> ALICE = Map.of(Scope.USER, "alice");
+
+	private static final String ALLOW_UNCOSTED = "token-allowance.pricing.unknown-model=allow-uncosted";
 
 	private final ApplicationContextRunner runner = new ApplicationContextRunner()
 		.withConfiguration(AutoConfigurations.of(TokenAllowanceAutoConfiguration.class));
@@ -233,18 +241,29 @@ class TokenAllowanceAutoConfigurationTest {
 
 	@Test
 	void publishesReachedThresholdToEventListeners() {
-		runner.withUserConfiguration(ThresholdRecorder.class)
+		runner.withUserConfiguration(EventRecorder.class)
 			.withPropertyValues(USER_DAILY_LIMIT)
-			.withPropertyValues("token-allowance.pricing.unknown-model=allow-uncosted")
+			.withPropertyValues(ALLOW_UNCOSTED)
 			.run(context -> {
-				BudgetService service = context.getBean(BudgetService.class);
-				TokenUsage usage = new TokenUsage(800, 0, 0, 0);
-				Decision decision = service.reserve(ALICE, "any-model", usage);
-				service.settle(((Decision.Reserved) decision).reservation(), "any-model", usage);
+				chargeAlice(context.getBean(BudgetService.class), 800);
 
-				assertThat(context.getBean(ThresholdRecorder.class).reached)
+				assertThat(context.getBean(EventRecorder.class).reached)
 					.extracting(BudgetThresholdReached::percent)
 					.containsExactly(80);
+			});
+	}
+
+	@Test
+	void publishesSettledCallToEventListeners() {
+		runner.withUserConfiguration(EventRecorder.class)
+			.withPropertyValues(USER_DAILY_LIMIT)
+			.withPropertyValues(ALLOW_UNCOSTED)
+			.run(context -> {
+				chargeAlice(context.getBean(BudgetService.class), 100);
+
+				assertThat(context.getBean(EventRecorder.class).settled).singleElement()
+					.extracting(CallSettled::outcome)
+					.isEqualTo(CallSettled.Outcome.CHARGED);
 			});
 	}
 
@@ -303,6 +322,24 @@ class TokenAllowanceAutoConfigurationTest {
 	}
 
 	@Test
+	void mapsEndpointSelectorsToWebPath() {
+		webRunner
+			.withConfiguration(AutoConfigurations.of(EndpointAutoConfiguration.class, WebEndpointAutoConfiguration.class))
+			.withPropertyValues("management.endpoints.web.exposure.include=" + TokenAllowanceEndpoint.ID)
+			.run(context -> {
+				assertThat(context).hasNotFailed();
+				ExposableWebEndpoint endpoint = context.getBean(WebEndpointsSupplier.class)
+					.getEndpoints()
+					.stream()
+					.filter(candidate -> candidate.getEndpointId().equals(EndpointId.of(TokenAllowanceEndpoint.ID)))
+					.findFirst()
+					.orElseThrow();
+				assertThat(endpoint.getOperations()).extracting(operation -> operation.getRequestPredicate().getPath())
+					.containsExactly(TokenAllowanceEndpoint.ID + "/{scope}/{subjectId}");
+			});
+	}
+
+	@Test
 	void registersNoEndpointUnlessExposed() {
 		runner.run(context -> assertThat(context).doesNotHaveBean(TokenAllowanceEndpoint.class));
 	}
@@ -337,13 +374,26 @@ class TokenAllowanceAutoConfigurationTest {
 			});
 	}
 
-	static class ThresholdRecorder {
+	private static void chargeAlice(BudgetService service, long inputTokens) {
+		TokenUsage usage = new TokenUsage(inputTokens, 0, 0, 0);
+		Decision decision = service.reserve(ALICE, "any-model", usage);
+		service.settle(((Decision.Reserved) decision).reservation(), "any-model", usage);
+	}
+
+	static class EventRecorder {
 
 		private final List<BudgetThresholdReached> reached = new ArrayList<>();
+
+		private final List<CallSettled> settled = new ArrayList<>();
 
 		@EventListener
 		void on(BudgetThresholdReached event) {
 			this.reached.add(event);
+		}
+
+		@EventListener
+		void on(CallSettled event) {
+			this.settled.add(event);
 		}
 	}
 

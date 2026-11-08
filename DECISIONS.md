@@ -513,7 +513,7 @@ Redis by hand.
 - Anyone who can reach the endpoint can read any subject's spend; apps secure it like other actuator
   endpoints.
 
-## 23. Budget threshold events (2026-11-08)
+## 23. Budget threshold and settled-call events (2026-11-08)
 
 **Context**
 Meters show totals and the actuator endpoint answers only when asked. Apps also want to act the
@@ -536,6 +536,8 @@ moment a user nears a budget: warn them, or tell an operator before requests sta
   no Spring copy of it. `ApplicationEventBudgetListener` catches exceptions from event listeners
   and logs them, because the call has already been charged.
 - Events also fire in observe mode. During a ledger outage the charge is lost, so no event fires.
+- `CallSettled` (from 5.1) is published the same way, once per charged or released model call,
+  so apps can keep their own audit log. It is published even during a ledger outage.
 
 **Consequence**
 - Custom `UsageLedger` implementations must return the committed totals from `commit` (breaking

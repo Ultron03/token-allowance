@@ -40,6 +40,8 @@
 	</scm>
 	<properties>
 		<maven.compiler.release>17</maven.compiler.release>
+		<!-- Actuator maps @Selector parameters to URL segments by name. -->
+		<maven.compiler.parameters>true</maven.compiler.parameters>
 		<spring-boot.version>4.1.1</spring-boot.version>
 		<spring-ai.version>2.0.1</spring-ai.version>
 	</properties>
