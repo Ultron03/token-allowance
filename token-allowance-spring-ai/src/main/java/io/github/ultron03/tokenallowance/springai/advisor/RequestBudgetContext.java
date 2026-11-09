@@ -1,6 +1,5 @@
 package io.github.ultron03.tokenallowance.springai.advisor;
 
-import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -9,8 +8,9 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.jspecify.annotations.Nullable;
 import org.springframework.ai.chat.client.ChatClientRequest;
 
+import io.github.ultron03.tokenallowance.core.Caller;
 import io.github.ultron03.tokenallowance.core.Money;
-import io.github.ultron03.tokenallowance.core.Scope;
+import io.github.ultron03.tokenallowance.core.RequestLimit;
 
 /**
  * Who a request is for and what it has used so far, shared by every model call of one request.
@@ -22,16 +22,21 @@ public final class RequestBudgetContext {
 	/** Key of this object in the advisor context. */
 	public static final String CONTEXT_KEY = "token-allowance.request-budget";
 
-	private final Map<Scope, String> subjectIds;
+	private final Caller caller;
+
+	private final RequestLimit endpointLimit;
 
 	private final AtomicInteger modelCalls = new AtomicInteger();
 
 	private final AtomicReference<Money> cost = new AtomicReference<>(Money.ZERO);
 
-	/** Creates the context for one request. */
-	public RequestBudgetContext(Map<Scope, String> subjectIds) {
-		Objects.requireNonNull(subjectIds, "subjectIds can't be null");
-		this.subjectIds = Map.copyOf(subjectIds);
+	/**
+	 * Creates the context for one request.
+	 * @param endpointLimit the caps the endpoint set with {@link RequestLimitParams}
+	 */
+	public RequestBudgetContext(Caller caller, RequestLimit endpointLimit) {
+		this.caller = Objects.requireNonNull(caller, "caller can't be null");
+		this.endpointLimit = Objects.requireNonNull(endpointLimit, "endpointLimit can't be null");
 	}
 
 	/** Returns the context the admission advisor stored in the request, if any. */
@@ -43,9 +48,14 @@ public final class RequestBudgetContext {
 		return Optional.empty();
 	}
 
-	/** Returns who the request is for, one id per scope; empty if no subject was found. */
-	public Map<Scope, String> subjectIds() {
-		return this.subjectIds;
+	/** Returns who the request is for and their plan; no ids if no subject was found. */
+	public Caller caller() {
+		return this.caller;
+	}
+
+	/** Returns the per-request caps the endpoint set; unset caps come from configuration. */
+	public RequestLimit endpointLimit() {
+		return this.endpointLimit;
 	}
 
 	/** Counts one more model call and returns the new total. */

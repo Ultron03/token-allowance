@@ -55,6 +55,22 @@ class SpringSecuritySubjectResolverTest {
 		assertThat(this.resolver.resolve(this.request)).isEmpty();
 	}
 
+	@Test
+	void readsPlanFromPlanAuthority() {
+		authenticate(UsernamePasswordAuthenticationToken.authenticated("alice", null,
+				AuthorityUtils.createAuthorityList("ROLE_USER", "PLAN_pro")));
+
+		assertThat(this.resolver.resolvePlan(this.request)).isEqualTo("pro");
+	}
+
+	@Test
+	void hasNoPlanWithoutPlanAuthority() {
+		authenticate(UsernamePasswordAuthenticationToken.authenticated("alice", null,
+				AuthorityUtils.createAuthorityList("ROLE_USER")));
+
+		assertThat(this.resolver.resolvePlan(this.request)).isNull();
+	}
+
 	private static void authenticate(Authentication authentication) {
 		SecurityContextHolder.getContext().setAuthentication(authentication);
 	}

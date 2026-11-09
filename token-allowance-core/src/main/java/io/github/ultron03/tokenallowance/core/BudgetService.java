@@ -5,7 +5,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
-import java.util.HashSet;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -22,7 +22,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Applies the configured limits to a request: admits it, reserves before each model call and
+ * Applies the caller's limits to a request: admits it, reserves before each model call and
  * settles after. Adapters only pass in who is calling and what was used; the rules live here.
  */
 public class BudgetService {
@@ -33,7 +33,7 @@ public class BudgetService {
 
 	private final PriceCatalog priceCatalog;
 
-	private final List<Limit> limits;
+	private final LimitResolver limitResolver;
 
 	private final EnforcementMode mode;
 
@@ -44,6 +44,8 @@ public class BudgetService {
 	private final RequestLimit requestLimit;
 
 	private final Set<String> modelsWithoutUsage;
+
+	private final Set<String> uncostedModels;
 
 	private final LedgerFailureMode failureMode;
 
@@ -76,25 +78,27 @@ public class BudgetService {
 	 */
 	public BudgetService(UsageLedger ledger, PriceCatalog priceCatalog, List<Limit> limits, RequestLimit requestLimit,
 			EnforcementMode mode, LedgerFailureMode failureMode, Clock clock, ZoneId zone) {
-		this(ledger, priceCatalog, limits, requestLimit, mode, failureMode, clock, zone, List.of(), List.of());
+		this(ledger, priceCatalog, new PlanLimits(limits, Map.of()), requestLimit, mode, failureMode, clock, zone,
+				List.of(), List.of());
 	}
 
 	/**
 	 * Creates the service.
-	 * @param limits the configured limits; at most one per scope and window
-	 * @param requestLimit the caps on each single request
+	 * @param limitResolver decides which limits apply to each caller
+	 * @param requestLimit the caps on each single request, unless an endpoint sets its own
 	 * @param failureMode what happens to new calls while the ledger can't be reached
 	 * @param zone the zone windows start in
 	 * @param thresholds percents of a limit at which listeners are told, each 1 to 100
 	 * @param listeners told about every decision, settled call and reached threshold, in this order
-	 * @throws IllegalArgumentException if two limits share a scope and window, or a threshold is out of range
+	 * @throws IllegalArgumentException if a threshold is out of range
 	 */
-	public BudgetService(UsageLedger ledger, PriceCatalog priceCatalog, List<Limit> limits, RequestLimit requestLimit,
+	public BudgetService(UsageLedger ledger, PriceCatalog priceCatalog, LimitResolver limitResolver,
+			RequestLimit requestLimit,
 			EnforcementMode mode, LedgerFailureMode failureMode, Clock clock, ZoneId zone,
 			List<Integer> thresholds, List<BudgetListener> listeners) {
 		Objects.requireNonNull(ledger, "ledger can't be null");
 		Objects.requireNonNull(priceCatalog, "priceCatalog can't be null");
-		Objects.requireNonNull(limits, "limits can't be null");
+		Objects.requireNonNull(limitResolver, "limitResolver can't be null");
 		Objects.requireNonNull(requestLimit, "requestLimit can't be null");
 		Objects.requireNonNull(mode, "mode can't be null");
 		Objects.requireNonNull(failureMode, "failureMode can't be null");
@@ -102,18 +106,18 @@ public class BudgetService {
 		Objects.requireNonNull(zone, "zone can't be null");
 		Objects.requireNonNull(thresholds, "thresholds can't be null");
 		Objects.requireNonNull(listeners, "listeners can't be null");
-		requireOneLimitPerScopeAndWindow(limits);
 		requireValidThresholds(thresholds);
 
 		this.ledger = ledger;
 		this.priceCatalog = priceCatalog;
-		this.limits = List.copyOf(limits);
+		this.limitResolver = limitResolver;
 		this.requestLimit = requestLimit;
 		this.mode = mode;
 		this.failureMode = failureMode;
 		this.clock = clock;
 		this.zone = zone;
 		this.modelsWithoutUsage = ConcurrentHashMap.newKeySet();
+		this.uncostedModels = ConcurrentHashMap.newKeySet();
 		this.ledgerDown = new AtomicBoolean(false);
 		this.thresholds = List.copyOf(new TreeSet<>(thresholds));
 		this.listeners = List.copyOf(listeners);
@@ -122,14 +126,14 @@ public class BudgetService {
 	/**
 	 * Checks once per request whether finished calls have already used up a budget. Calls still in
 	 * flight are not counted here; {@link #reserve} checks those.
-	 * @param subjectIds who is calling, one id per scope; {@link Scope#GLOBAL} needs none
 	 * @return {@link Decision.Allowed}, or {@link Decision.Denied} in enforce mode
 	 * @throws LedgerUnavailableException if the ledger can't be reached and the failure mode is fail-closed
+	 * @throws IllegalArgumentException if the caller's limits have two of one scope and window
 	 */
-	public Decision admit(Map<Scope, String> subjectIds) {
-		Objects.requireNonNull(subjectIds, "subjectIds can't be null");
+	public Decision admit(Caller caller) {
+		Objects.requireNonNull(caller, "caller can't be null");
 		Instant now = this.clock.instant();
-		Map<BudgetKey, Limit> keys = keysFor(subjectIds, now);
+		Map<BudgetKey, Limit> keys = keysFor(caller, now);
 
 		try {
 			Decision decision = admitOnLedger(keys, now);
@@ -167,15 +171,18 @@ public class BudgetService {
 	/**
 	 * Checks before each model call whether the request has used up its own caps. Only finished
 	 * calls count, so a request can go over the cost cap by at most one call.
+	 * @param endpointLimit caps the endpoint set for its requests; a cap it doesn't set comes from configuration
 	 * @param callsSoFar model calls this request has already made
 	 * @param costSoFar what those calls cost
 	 * @return {@link Decision.Allowed}, or {@link Decision.Denied} in enforce mode, with no wait
 	 *         because the next request starts with fresh counters
 	 */
-	public Decision checkRequest(int callsSoFar, Money costSoFar) {
+	public Decision checkRequest(RequestLimit endpointLimit, int callsSoFar, Money costSoFar) {
+		Objects.requireNonNull(endpointLimit, "endpointLimit can't be null");
 		Objects.requireNonNull(costSoFar, "costSoFar can't be null");
-		@Nullable Integer maxModelCalls = this.requestLimit.maxModelCalls();
-		@Nullable Money maxCost = this.requestLimit.maxCost();
+		RequestLimit limit = endpointLimit.orElse(this.requestLimit);
+		@Nullable Integer maxModelCalls = limit.maxModelCalls();
+		@Nullable Money maxCost = limit.maxCost();
 
 		@Nullable String reason = null;
 		if (maxModelCalls != null && callsSoFar >= maxModelCalls) {
@@ -199,20 +206,24 @@ public class BudgetService {
 
 	/**
 	 * Holds the estimate of one model call on every budget that applies to the caller.
-	 * @param subjectIds who is calling, one id per scope; {@link Scope#GLOBAL} needs none
+	 * @param endpointLimit the caps the endpoint set for its requests, used to tell whether a cost cap applies
 	 * @param model the model the call goes to, used to price the estimate
 	 * @param estimate the expected usage of the call
 	 * @return {@link Decision.Reserved}, or {@link Decision.Denied} in enforce mode
-	 * @throws UnknownModelException if the model has no price and the unknown-model policy rejects it
+	 * @throws UnknownModelException if the model has no price, the unknown-model policy rejects it, and a
+	 *         cost cap applies to the call; without one, its tokens are counted with no cost
 	 * @throws LedgerUnavailableException if the ledger can't be reached and the failure mode is fail-closed
+	 * @throws IllegalArgumentException if the caller's limits have two of one scope and window
 	 */
-	public Decision reserve(Map<Scope, String> subjectIds, String model, TokenUsage estimate) {
-		Objects.requireNonNull(subjectIds, "subjectIds can't be null");
+	public Decision reserve(Caller caller, RequestLimit endpointLimit, String model, TokenUsage estimate) {
+		Objects.requireNonNull(caller, "caller can't be null");
+		Objects.requireNonNull(endpointLimit, "endpointLimit can't be null");
 		Objects.requireNonNull(model, "model can't be null");
 		Objects.requireNonNull(estimate, "estimate can't be null");
 		Instant now = this.clock.instant();
-		Map<BudgetKey, Limit> keys = keysFor(subjectIds, now);
-		Amount amount = new Amount(estimate.total(), costOf(model, estimate));
+		Map<BudgetKey, Limit> keys = keysFor(caller, now);
+		boolean costCapped = hasCostCap(keys.values(), endpointLimit.orElse(this.requestLimit));
+		Amount amount = new Amount(estimate.total(), costOf(model, estimate, costCapped));
 
 		try {
 			Decision decision = reserveOnLedger(keys, amount, now);
@@ -249,10 +260,12 @@ public class BudgetService {
 	 * Charges the actual usage of a finished call. Never denied, because the call already happened.
 	 * Charges the estimate instead if the provider reported no usage. If the ledger can't be reached
 	 * the charge is lost and logged, in every failure mode.
+	 * @param caller who made the call; thresholds are measured against their limits
 	 * @param model the model the call went to, used to price the usage
 	 * @return what was charged, so the caller can add it to the request's total
 	 */
-	public Amount settle(Reservation reservation, String model, TokenUsage actual) {
+	public Amount settle(Caller caller, Reservation reservation, String model, TokenUsage actual) {
+		Objects.requireNonNull(caller, "caller can't be null");
 		Objects.requireNonNull(reservation, "reservation can't be null");
 		Objects.requireNonNull(model, "model can't be null");
 		Objects.requireNonNull(actual, "actual can't be null");
@@ -263,7 +276,8 @@ public class BudgetService {
 			charged = reservation.amount();
 		}
 		else {
-			charged = new Amount(actual.total(), costOf(model, actual));
+			// Reserve already accepted this model, so a missing price never fails the charge.
+			charged = new Amount(actual.total(), costOf(model, actual, false));
 		}
 
 		Map<BudgetKey, Amount> committedAfter = Map.of();
@@ -278,7 +292,9 @@ public class BudgetService {
 		CallSettled.Outcome outcome = actual.isZero() ? CallSettled.Outcome.ESTIMATE_CHARGED
 				: CallSettled.Outcome.CHARGED;
 		notifySettled(new CallSettled(model, reservation.keys(), reservation.amount(), actual, charged, outcome));
-		notifyThresholdsReached(committedAfter, charged);
+		if (!committedAfter.isEmpty()) {
+			notifyThresholdsReached(limitsOf(caller), committedAfter, charged);
+		}
 		return charged;
 	}
 
@@ -301,30 +317,22 @@ public class BudgetService {
 				CallSettled.Outcome.RELEASED));
 	}
 
-	private static void requireOneLimitPerScopeAndWindow(List<Limit> limits) {
-		Set<String> seen = new HashSet<>();
-		for (Limit limit : limits) {
-			if (!seen.add(limit.scope() + "/" + limit.window())) {
-				throw new IllegalArgumentException("More than one " + limit.scope() + " " + limit.window()
-						+ " limit; put both caps in one limit");
-			}
-		}
-	}
-
 	/**
 	 * Reads where a subject stands against each limit of a scope in the current window. Changes
-	 * nothing and applies no failure mode.
+	 * nothing and applies no failure mode. The limits are resolved for a caller that has only this
+	 * one subject id, so a custom {@link LimitResolver} can't see the subject's other ids.
 	 * @param subjectId ignored for {@link Scope#GLOBAL}, which has one shared budget
-	 * @return one status per limit of the scope, in configuration order; empty if the scope has none
+	 * @param plan the subject's plan, or null for the limits every caller has
+	 * @return one status per limit of the scope, in the resolver's order; empty if the scope has none
 	 * @throws LedgerUnavailableException if the ledger can't be reached
 	 */
-	public List<BudgetStatus> statusOf(Scope scope, String subjectId) {
+	public List<BudgetStatus> statusOf(Scope scope, String subjectId, @Nullable String plan) {
 		Objects.requireNonNull(scope, "scope can't be null");
 		Objects.requireNonNull(subjectId, "subjectId can't be null");
 		Instant now = this.clock.instant();
 
 		List<BudgetStatus> statuses = new ArrayList<>();
-		for (Limit limit : this.limits) {
+		for (Limit limit : limitsOf(new Caller(Map.of(scope, subjectId), plan))) {
 			if (limit.scope() == scope) {
 				BudgetKey key = BudgetKey.of(scope, subjectId, limit.window(), now, this.zone);
 				statuses.add(new BudgetStatus(limit, key.windowStart(), limit.window().endOf(now, this.zone),
@@ -334,11 +342,54 @@ public class BudgetService {
 		return statuses;
 	}
 
-	private Map<BudgetKey, Limit> keysFor(Map<Scope, String> subjectIds, Instant now) {
+	/**
+	 * Gives a subject room back, for example after a bug burnt its budget: takes {@code amount} off
+	 * its committed spend in the current window of every window length, never below zero. Calls in
+	 * flight keep their reservations. Applies no failure mode.
+	 * @param subjectId ignored for {@link Scope#GLOBAL}, which has one shared budget
+	 * @throws LedgerUnavailableException if the ledger can't be reached
+	 */
+	public void topUp(Scope scope, String subjectId, Amount amount) {
+		Objects.requireNonNull(amount, "amount can't be null");
+		for (BudgetKey key : currentKeysOf(scope, subjectId)) {
+			this.ledger.refund(key, amount);
+		}
+	}
+
+	/**
+	 * Clears a subject's committed spend in the current window of every window length. Calls in
+	 * flight keep their reservations, and a call that settles while this runs stays charged.
+	 * @param subjectId ignored for {@link Scope#GLOBAL}, which has one shared budget
+	 * @throws LedgerUnavailableException if the ledger can't be reached
+	 */
+	public void reset(Scope scope, String subjectId) {
+		for (BudgetKey key : currentKeysOf(scope, subjectId)) {
+			this.ledger.refund(key, this.ledger.current(key).committed());
+		}
+	}
+
+	private List<BudgetKey> currentKeysOf(Scope scope, String subjectId) {
+		Objects.requireNonNull(scope, "scope can't be null");
+		Objects.requireNonNull(subjectId, "subjectId can't be null");
+		Instant now = this.clock.instant();
+		List<BudgetKey> keys = new ArrayList<>();
+		for (Window window : Window.values()) {
+			keys.add(BudgetKey.of(scope, subjectId, window, now, this.zone));
+		}
+		return keys;
+	}
+
+	private List<Limit> limitsOf(Caller caller) {
+		List<Limit> limits = this.limitResolver.limitsFor(caller);
+		PlanLimits.requireOnePerScopeAndWindow(limits);
+		return limits;
+	}
+
+	private Map<BudgetKey, Limit> keysFor(Caller caller, Instant now) {
 		Map<BudgetKey, Limit> keys = new LinkedHashMap<>();
-		for (Limit limit : this.limits) {
+		for (Limit limit : limitsOf(caller)) {
 			@Nullable String subjectId = (limit.scope() == Scope.GLOBAL) ? BudgetKey.GLOBAL_SUBJECT
-					: subjectIds.get(limit.scope());
+					: caller.subjectIds().get(limit.scope());
 			if (subjectId != null) {
 				keys.put(BudgetKey.of(limit.scope(), subjectId, limit.window(), now, this.zone), limit);
 			}
@@ -346,8 +397,28 @@ public class BudgetService {
 		return keys;
 	}
 
-	private Money costOf(String model, TokenUsage usage) {
-		return this.priceCatalog.priceFor(model).map(price -> price.costOf(usage)).orElse(Money.ZERO);
+	/** Prices usage; a model without a price is only rejected when a cost cap needs its cost. */
+	private Money costOf(String model, TokenUsage usage, boolean costCapped) {
+		try {
+			return this.priceCatalog.priceFor(model).map(price -> price.costOf(usage)).orElse(Money.ZERO);
+		}
+		catch (UnknownModelException ex) {
+			if (costCapped) {
+				throw ex;
+			}
+			warnUncostedOnce(model);
+			return Money.ZERO;
+		}
+	}
+
+	private static boolean hasCostCap(Collection<Limit> limits, RequestLimit requestLimit) {
+		return requestLimit.maxCost() != null || limits.stream().anyMatch(limit -> limit.maxCost() != null);
+	}
+
+	private void warnUncostedOnce(String model) {
+		if (this.uncostedModels.add(model)) {
+			log.warn("Model '{}' has no price and no cost cap applies, so its tokens are counted without cost", model);
+		}
 	}
 
 	private Decision.Denied denied(BudgetKey key, Instant now) {
@@ -413,8 +484,8 @@ public class BudgetService {
 		}
 	}
 
-	private @Nullable Limit limitFor(BudgetKey key) {
-		for (Limit limit : this.limits) {
+	private static @Nullable Limit limitFor(List<Limit> limits, BudgetKey key) {
+		for (Limit limit : limits) {
 			if (limit.appliesTo(key)) {
 				return limit;
 			}
@@ -423,11 +494,11 @@ public class BudgetService {
 	}
 
 	/** Tells listeners about each threshold this charge crossed; commits on one key are serialised, so only one call crosses it. */
-	private void notifyThresholdsReached(Map<BudgetKey, Amount> committedAfter, Amount charged) {
+	private void notifyThresholdsReached(List<Limit> limits, Map<BudgetKey, Amount> committedAfter, Amount charged) {
 		for (Map.Entry<BudgetKey, Amount> entry : committedAfter.entrySet()) {
 			BudgetKey key = entry.getKey();
 			Amount after = entry.getValue();
-			@Nullable Limit limit = limitFor(key);
+			@Nullable Limit limit = limitFor(limits, key);
 			if (limit == null) {
 				continue;
 			}

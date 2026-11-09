@@ -2,21 +2,23 @@ package io.github.ultron03.tokenallowance.springai.advisor;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import java.util.EnumMap;
 import java.util.Map;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.client.ChatClientRequest;
 import org.springframework.ai.chat.prompt.Prompt;
 
+import io.github.ultron03.tokenallowance.core.Caller;
 import io.github.ultron03.tokenallowance.core.Money;
-import io.github.ultron03.tokenallowance.core.Scope;
+import io.github.ultron03.tokenallowance.core.RequestLimit;
 
 class RequestBudgetContextTest {
 
+	private static final Caller NOBODY = new Caller(Map.of(), null);
+
 	@Test
 	void countsModelCalls() {
-		RequestBudgetContext context = new RequestBudgetContext(Map.of());
+		RequestBudgetContext context = new RequestBudgetContext(NOBODY, RequestLimit.NONE);
 
 		context.recordModelCall();
 		int second = context.recordModelCall();
@@ -27,7 +29,7 @@ class RequestBudgetContextTest {
 
 	@Test
 	void addsCost() {
-		RequestBudgetContext context = new RequestBudgetContext(Map.of());
+		RequestBudgetContext context = new RequestBudgetContext(NOBODY, RequestLimit.NONE);
 
 		context.addCost(new Money(150));
 		context.addCost(new Money(50));
@@ -37,26 +39,15 @@ class RequestBudgetContextTest {
 
 	@Test
 	void startsWithNoCallsAndNoCost() {
-		RequestBudgetContext context = new RequestBudgetContext(Map.of());
+		RequestBudgetContext context = new RequestBudgetContext(NOBODY, RequestLimit.NONE);
 
 		assertThat(context.modelCalls()).isZero();
 		assertThat(context.cost()).isEqualTo(Money.ZERO);
 	}
 
 	@Test
-	void copiesSubjectIds() {
-		Map<Scope, String> ids = new EnumMap<>(Scope.class);
-		ids.put(Scope.USER, "alice");
-		RequestBudgetContext context = new RequestBudgetContext(ids);
-
-		ids.put(Scope.USER, "mallory");
-
-		assertThat(context.subjectIds()).containsExactly(Map.entry(Scope.USER, "alice"));
-	}
-
-	@Test
 	void fromReturnsContextStoredInRequest() {
-		RequestBudgetContext context = new RequestBudgetContext(Map.of());
+		RequestBudgetContext context = new RequestBudgetContext(NOBODY, RequestLimit.NONE);
 		ChatClientRequest request = ChatClientRequest.builder()
 			.prompt(new Prompt("hi"))
 			.context(RequestBudgetContext.CONTEXT_KEY, context)

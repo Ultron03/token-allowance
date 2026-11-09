@@ -20,11 +20,12 @@ import org.slf4j.LoggerFactory;
  *
  * <p>One lock guards all counters, so a reservation across several keys is atomic. A new window
  * gets a new {@link BudgetKey}, so it starts empty; counters of ended windows are dropped once a
- * day, unless a reservation on them is still open.
+ * minute, unless a reservation on them is still open.
  */
 public class InMemoryUsageLedger implements UsageLedger {
 
-	private static final Duration EVICTION_INTERVAL = Duration.ofDays(1);
+	/** As short as the shortest window, so minute counters don't pile up. */
+	private static final Duration EVICTION_INTERVAL = Duration.ofMinutes(1);
 
 	private static final Logger log = LoggerFactory.getLogger(InMemoryUsageLedger.class);
 
@@ -95,6 +96,18 @@ public class InMemoryUsageLedger implements UsageLedger {
 		Objects.requireNonNull(key, "key can't be null");
 		synchronized (this.lock) {
 			return spendOf(key);
+		}
+	}
+
+	@Override
+	public void refund(BudgetKey key, Amount amount) {
+		Objects.requireNonNull(key, "key can't be null");
+		Objects.requireNonNull(amount, "amount can't be null");
+		synchronized (this.lock) {
+			@Nullable Spend spend = this.spendByKey.get(key);
+			if (spend != null) {
+				this.spendByKey.put(key, spend.refunded(amount));
+			}
 		}
 	}
 

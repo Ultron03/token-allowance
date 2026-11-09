@@ -3,6 +3,7 @@ package io.github.ultron03.tokenallowance.autoconfigure;
 import java.math.BigDecimal;
 import java.time.ZoneId;
 import java.util.List;
+import java.util.Map;
 
 import org.jspecify.annotations.Nullable;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -28,10 +29,11 @@ import jakarta.validation.constraints.PositiveOrZero;
  *
  * @param enabled whether Token Allowance is switched on
  * @param mode whether a used-up budget denies requests or is only logged
- * @param zone the time zone in which daily and monthly windows start
+ * @param zone the time zone in which hour, day and month windows start
  * @param subject how a request's user is found
  * @param pricing model prices and what to do with unknown models
- * @param limits the budgets, one per scope and window
+ * @param limits the budgets every caller has, one per scope and window
+ * @param plans per plan name, the budgets that replace or add to {@code limits} for callers on that plan
  * @param perRequest caps on one request, to cut off runaway tool loops
  * @param stream how interrupted streams are charged
  * @param web the HTTP response for a used-up budget
@@ -43,16 +45,18 @@ import jakarta.validation.constraints.PositiveOrZero;
 public record TokenAllowanceProperties(@DefaultValue("true") boolean enabled,
 		@DefaultValue("enforce") EnforcementMode mode, @DefaultValue("UTC") ZoneId zone,
 		@DefaultValue @Valid Subject subject, @DefaultValue @Valid Pricing pricing,
-		@DefaultValue List<@Valid LimitProperties> limits, @DefaultValue @Valid PerRequest perRequest,
+		@DefaultValue List<@Valid LimitProperties> limits,
+		@DefaultValue Map<String, List<@Valid LimitProperties>> plans, @DefaultValue @Valid PerRequest perRequest,
 		@DefaultValue Streaming stream, @DefaultValue Web web, @DefaultValue Store store,
 		@DefaultValue({"80", "100"}) List<@Min(1) @Max(100) Integer> thresholds) {
 
 	/** Prefix of all Token Allowance properties. */
 	public static final String PREFIX = "token-allowance";
 
-	/** Copies the list, so the bound settings can't change later. */
+	/** Copies the collections, so the bound settings can't change later. */
 	public TokenAllowanceProperties {
 		limits = List.copyOf(limits);
+		plans = Map.copyOf(plans);
 		thresholds = List.copyOf(thresholds);
 	}
 
@@ -121,7 +125,7 @@ public record TokenAllowanceProperties(@DefaultValue("true") boolean enabled,
 	}
 
 	/**
-	 * Caps on one request. Unset caps don't apply.
+	 * Caps on one request. Unset caps don't apply. An endpoint can replace them with advisor params.
 	 *
 	 * @param maxModelCalls the most model calls one request may make, or null for no cap
 	 * @param maxCost the most dollars one request may cost, or null for no cap

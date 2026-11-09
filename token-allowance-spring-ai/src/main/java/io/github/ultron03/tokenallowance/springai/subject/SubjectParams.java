@@ -12,6 +12,9 @@ public final class SubjectParams {
 	/** Key for the session id. */
 	public static final String SESSION_ID = "token-allowance.session-id";
 
+	/** Key for the caller's plan, such as {@code pro}; picks the limits under {@code token-allowance.plans}. */
+	public static final String PLAN = "token-allowance.plan";
+
 	private SubjectParams() {
 	}
 }

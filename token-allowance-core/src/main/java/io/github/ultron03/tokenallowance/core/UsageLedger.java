@@ -38,4 +38,10 @@ public interface UsageLedger {
 
 	/** {@return the committed and reserved spend of {@code key}, or zero if nothing is recorded} */
 	Spend current(BudgetKey key);
+
+	/**
+	 * Takes {@code amount} off the committed spend of {@code key}, never below zero, and leaves
+	 * reservations alone. Does nothing if nothing is recorded for the key.
+	 */
+	void refund(BudgetKey key, Amount amount);
 }

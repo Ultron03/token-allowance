@@ -32,6 +32,7 @@ import io.github.ultron03.tokenallowance.core.BudgetService;
 import io.github.ultron03.tokenallowance.core.ConfiguredPriceCatalog;
 import io.github.ultron03.tokenallowance.core.ConservativeTokenEstimator;
 import io.github.ultron03.tokenallowance.core.InMemoryUsageLedger;
+import io.github.ultron03.tokenallowance.core.LimitResolver;
 import io.github.ultron03.tokenallowance.core.PriceCatalog;
 import io.github.ultron03.tokenallowance.core.TokenEstimator;
 import io.github.ultron03.tokenallowance.core.UsageLedger;
@@ -104,12 +105,19 @@ public class TokenAllowanceAutoConfiguration {
 		return new InMemoryUsageLedger(clock, properties.zone());
 	}
 
-	/** Applies the configured limits and per-request caps, and tells every {@link BudgetListener} bean. */
+	/** Limits from {@code token-allowance.limits} and {@code token-allowance.plans}. */
 	@Bean
 	@ConditionalOnMissingBean
-	BudgetService budgetService(UsageLedger ledger, PriceCatalog priceCatalog, Clock clock,
-			TokenAllowanceProperties properties, ObjectProvider<BudgetListener> listeners) {
-		return new BudgetService(ledger, priceCatalog, PropertyMapping.limits(properties.limits()),
+	LimitResolver limitResolver(TokenAllowanceProperties properties) {
+		return PropertyMapping.planLimits(properties.limits(), properties.plans());
+	}
+
+	/** Applies each caller's limits and the per-request caps, and tells every {@link BudgetListener} bean. */
+	@Bean
+	@ConditionalOnMissingBean
+	BudgetService budgetService(UsageLedger ledger, PriceCatalog priceCatalog, LimitResolver limitResolver,
+			Clock clock, TokenAllowanceProperties properties, ObjectProvider<BudgetListener> listeners) {
+		return new BudgetService(ledger, priceCatalog, limitResolver,
 				PropertyMapping.requestLimit(properties.perRequest()), properties.mode(),
 				PropertyMapping.failureMode(properties.store().failureMode(), properties.mode()), clock,
 				properties.zone(), properties.thresholds(), listeners.orderedStream().toList());
