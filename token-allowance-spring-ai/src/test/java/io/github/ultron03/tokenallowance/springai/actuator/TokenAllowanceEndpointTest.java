@@ -54,7 +54,7 @@ class TokenAllowanceEndpointTest {
 
 	@Test
 	void showsSpendAndCapsInDollars() {
-		Decision decision = this.budgetService.reserve(new Caller(Map.of(Scope.USER, "alice"), null), MODEL,
+		Decision decision = this.budgetService.reserve(new Caller(Map.of(Scope.USER, "alice"), null), RequestLimit.NONE, MODEL,
 				new TokenUsage(1000, 500, 0, 0));
 
 		SubjectBudgets budgets = this.endpoint.budgets(Scope.USER, "alice", null);

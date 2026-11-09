@@ -629,3 +629,25 @@ or deleting Redis keys.
 
 **Consequence**
 - Custom `UsageLedger` implementations must add `refund` (breaking in 0.3.0).
+
+## 28. Unknown models without a cost cap, and conversation ids (2026-11-09)
+
+**Context**
+With the default `reject` policy, a model without a price failed every call, even when no limit
+capped cost. An app that only wanted token limits on a local or self-hosted model had to invent a
+price. Apps that use chat memory also had to pass their conversation id a second time to get
+session budgets.
+
+**Decision**
+- `reject` only rejects an unpriced model when a cost cap applies to the call: a `max-cost` on one
+  of the caller's limits, or a per-request cost cap (configured or set by the endpoint). Otherwise
+  the tokens are counted with no cost and a WARN is logged once per model. A cost cap is never
+  skipped silently.
+- `BudgetService.reserve` takes the endpoint's request caps, so it can tell. `settle` never rejects:
+  reserve already accepted the model.
+- `AdvisorParamSubjectResolver` uses Spring AI's `ChatMemory.CONVERSATION_ID` param as the session
+  id when no session id param is set.
+
+**Consequence**
+- Token-only setups need no pricing configuration.
+- Costs of unpriced models show as zero in metrics and events.

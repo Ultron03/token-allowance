@@ -149,7 +149,7 @@ Content-Type: application/problem+json
 
 Budgets with scope `user`, `tenant` or `session` need an id. For each scope, the first of these that has one wins:
 
-1. **An advisor param** on the call. This is the only way to pass tenant and session ids, and the only one that works in WebFlux, streams on other threads and background jobs.
+1. **An advisor param** on the call. This is the only way to pass tenant and session ids, and the only one that works in WebFlux, streams on other threads and background jobs. If you use chat memory, its `ChatMemory.CONVERSATION_ID` param is also the session id, so `session` budgets work per conversation without extra code.
 
    ```java
    chatClient.prompt()
@@ -164,6 +164,26 @@ Budgets with scope `user`, `tenant` or `session` need an id. For each scope, the
 3. **The `X-User-Id` header** (configurable). A client can send any value here, so only rely on it behind a gateway that sets it. Values longer than 128 characters are ignored.
 
 A request with no id is only checked against `global` budgets.
+
+### Chat without a login
+
+A public chat widget has no user id, so one visitor could use up the global budget for everyone. To give each visitor a budget, use the client's IP address as the user id. Define your own resolver chain with an IP resolver last:
+
+```java
+@Bean
+SubjectResolver subjectResolver() {
+    SubjectResolver byClientIp = request -> {
+        if (RequestContextHolder.getRequestAttributes() instanceof ServletRequestAttributes attributes) {
+            return Map.of(Scope.USER, "ip:" + attributes.getRequest().getRemoteAddr());
+        }
+        return Map.of();
+    };
+    return new CompositeSubjectResolver(List.of(new AdvisorParamSubjectResolver(),
+            new SpringSecuritySubjectResolver(), byClientIp));
+}
+```
+
+Behind a load balancer, set `server.forward-headers-strategy: framework` so the address is the client's, not the proxy's, and only if the proxy sets `X-Forwarded-For` itself. Everyone behind one office network shares an address, and so shares a budget.
 
 ## Plans
 
@@ -222,6 +242,24 @@ ChatClient agentClient = chatClientBuilder
 
 A cap the endpoint doesn't set comes from `per-request`. The same params work on a single call with `.advisors(..)`.
 
+## Showing users what they have left
+
+`BudgetService.statusOf` returns the caller's current spend for each limit of a scope, the same numbers the [actuator endpoint](#actuator-endpoint) shows. Use it to show a user how much is left and when it resets:
+
+```java
+for (BudgetStatus budget : budgetService.statusOf(Scope.USER, userId, plan)) {
+    Money cap = budget.limit().maxCost();
+    if (cap != null) {
+        BigDecimal left = cap.toDollars()
+            .subtract(budget.spend().committed().cost().toDollars())
+            .max(BigDecimal.ZERO);
+        view.addBudget(budget.limit().window(), left, budget.resetsAt());
+    }
+}
+```
+
+`committed` is what finished calls used; admission compares it with the cap. It throws `LedgerUnavailableException` while Redis can't be reached.
+
 ## Giving budget back
 
 Support can give back spend that a bug burnt, through the `BudgetService` bean:
@@ -243,7 +281,7 @@ All properties start with `token-allowance.`. Amounts are in dollars; write them
 | `mode` | `enforce` | `enforce` denies requests over budget; `observe` only logs them. |
 | `zone` | `UTC` | Time zone in which hour, day and month windows start. |
 | `subject.header` | `X-User-Id` | HTTP header with the user id. |
-| `pricing.unknown-model` | `reject` | A model with no price: `reject` fails the call, `allow-uncosted` counts its tokens but no cost, `default-price` uses `pricing.default-price`. |
+| `pricing.unknown-model` | `reject` | A model with no price: `reject` fails a call that a cost cap applies to (a `max-cost` limit or a per-request cost cap) and counts the tokens of any other call with no cost, `allow-uncosted` always counts tokens with no cost, `default-price` uses `pricing.default-price`. With only token limits, no prices are needed. |
 | `pricing.default-price.*` | none | Price for unknown models: `input-per-mtok`, `output-per-mtok`, optional `cached-input-per-mtok`, `cache-write-per-mtok`. |
 | `pricing.models[n].name` | none | Model name, matched ignoring case and a trailing date (`gpt-4o-2024-08-06` uses the `gpt-4o` price). |
 | `pricing.models[n].input-per-mtok` | none | Input price per million tokens. |

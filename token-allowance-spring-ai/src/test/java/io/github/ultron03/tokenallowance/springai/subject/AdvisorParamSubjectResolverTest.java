@@ -6,6 +6,7 @@ import java.util.Map;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.client.ChatClientRequest;
+import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.prompt.Prompt;
 
 import io.github.ultron03.tokenallowance.core.Scope;
@@ -57,6 +58,21 @@ class AdvisorParamSubjectResolverTest {
 		ChatClientRequest request = requestWith(Map.of("some-other-advisor.key", "value"));
 
 		assertThat(this.resolver.resolve(request)).isEmpty();
+	}
+
+	@Test
+	void usesChatMemoryConversationIdAsSessionId() {
+		ChatClientRequest request = requestWith(Map.of(ChatMemory.CONVERSATION_ID, "c-7"));
+
+		assertThat(this.resolver.resolve(request)).containsExactly(Map.entry(Scope.SESSION, "c-7"));
+	}
+
+	@Test
+	void sessionParamWinsOverConversationId() {
+		ChatClientRequest request = requestWith(Map.of(ChatMemory.CONVERSATION_ID, "c-7",
+				SubjectParams.SESSION_ID, "s-1"));
+
+		assertThat(this.resolver.resolve(request)).containsExactly(Map.entry(Scope.SESSION, "s-1"));
 	}
 
 	@Test

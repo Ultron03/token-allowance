@@ -69,7 +69,8 @@ class BudgetServiceTest {
 	@Test
 	void deniesAdmissionWhenCommittedSpendReachedLimit() {
 		BudgetService service = service(EnforcementMode.ENFORCE, USER_DAILY);
-		service.settle(ALICE, reservationOf(service.reserve(ALICE, MODEL, ESTIMATE)), MODEL, new TokenUsage(1500, 500, 0, 0));
+		service.settle(ALICE, reservationOf(service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE)), MODEL,
+				new TokenUsage(1500, 500, 0, 0));
 
 		Decision decision = service.admit(ALICE);
 
@@ -79,7 +80,7 @@ class BudgetServiceTest {
 	@Test
 	void admissionIgnoresCallsStillInFlight() {
 		BudgetService service = service(EnforcementMode.ENFORCE, USER_DAILY);
-		service.reserve(ALICE, MODEL, new TokenUsage(1500, 500, 0, 0));
+		service.reserve(ALICE, RequestLimit.NONE, MODEL, new TokenUsage(1500, 500, 0, 0));
 
 		Decision decision = service.admit(ALICE);
 
@@ -89,7 +90,8 @@ class BudgetServiceTest {
 	@Test
 	void admitsInObserveModeEvenWhenLimitReached() {
 		BudgetService service = service(EnforcementMode.OBSERVE, USER_DAILY);
-		service.settle(ALICE, reservationOf(service.reserve(ALICE, MODEL, ESTIMATE)), MODEL, new TokenUsage(1500, 500, 0, 0));
+		service.settle(ALICE, reservationOf(service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE)), MODEL,
+				new TokenUsage(1500, 500, 0, 0));
 
 		Decision decision = service.admit(ALICE);
 
@@ -100,7 +102,7 @@ class BudgetServiceTest {
 	void reservesPricedEstimateWhenUnderLimit() {
 		BudgetService service = service(EnforcementMode.ENFORCE, USER_DAILY);
 
-		Decision decision = service.reserve(ALICE, MODEL, ESTIMATE);
+		Decision decision = service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE);
 
 		assertThat(decision).isInstanceOf(Decision.Reserved.class);
 		assertThat(this.ledger.current(ALICE_TODAY).reserved()).isEqualTo(ESTIMATE_AMOUNT);
@@ -109,9 +111,9 @@ class BudgetServiceTest {
 	@Test
 	void deniesReservationOverLimitWithRetryAfterUntilWindowEnd() {
 		BudgetService service = service(EnforcementMode.ENFORCE, USER_DAILY);
-		service.reserve(ALICE, MODEL, ESTIMATE);
+		service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE);
 
-		Decision decision = service.reserve(ALICE, MODEL, ESTIMATE);
+		Decision decision = service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE);
 
 		assertThat(decision).isEqualTo(new Decision.Denied("user daily budget exceeded", Duration.ofHours(14)));
 	}
@@ -119,9 +121,9 @@ class BudgetServiceTest {
 	@Test
 	void reservesInObserveModeEvenOverLimitSoSpendIsRecorded() {
 		BudgetService service = service(EnforcementMode.OBSERVE, USER_DAILY);
-		service.reserve(ALICE, MODEL, ESTIMATE);
+		service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE);
 
-		Decision decision = service.reserve(ALICE, MODEL, ESTIMATE);
+		Decision decision = service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE);
 
 		assertThat(decision).isInstanceOf(Decision.Reserved.class);
 		assertThat(this.ledger.current(ALICE_TODAY).reserved().tokens()).isEqualTo(3000);
@@ -133,7 +135,7 @@ class BudgetServiceTest {
 		BudgetKey globalKey = BudgetKey.of(Scope.GLOBAL, BudgetKey.GLOBAL_SUBJECT, Window.MONTHLY, START,
 				ZoneOffset.UTC);
 
-		service.reserve(ALICE, MODEL, ESTIMATE);
+		service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE);
 
 		assertThat(this.ledger.current(globalKey).reserved()).isEqualTo(ESTIMATE_AMOUNT);
 	}
@@ -143,7 +145,7 @@ class BudgetServiceTest {
 		Limit tenantDaily = new Limit(Scope.TENANT, Window.DAILY, 1L, null);
 		BudgetService service = service(EnforcementMode.ENFORCE, tenantDaily);
 
-		Decision decision = service.reserve(ALICE, MODEL, ESTIMATE);
+		Decision decision = service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE);
 
 		assertThat(reservationOf(decision).keys()).isEmpty();
 	}
@@ -154,7 +156,7 @@ class BudgetServiceTest {
 		BudgetService service = new BudgetService(this.ledger, uncosted, List.of(USER_DAILY), EnforcementMode.ENFORCE,
 				this.clock, ZoneOffset.UTC);
 
-		service.reserve(ALICE, "other-model", ESTIMATE);
+		service.reserve(ALICE, RequestLimit.NONE, "other-model", ESTIMATE);
 
 		assertThat(this.ledger.current(ALICE_TODAY).reserved()).isEqualTo(new Amount(1500, Money.ZERO));
 	}
@@ -163,14 +165,14 @@ class BudgetServiceTest {
 	void throwsForUnknownModelWhenPolicyRejects() {
 		BudgetService service = service(EnforcementMode.ENFORCE, USER_DAILY);
 
-		assertThatThrownBy(() -> service.reserve(ALICE, "other-model", ESTIMATE))
+		assertThatThrownBy(() -> service.reserve(ALICE, RequestLimit.NONE, "other-model", ESTIMATE))
 				.isInstanceOf(UnknownModelException.class);
 	}
 
 	@Test
 	void settleChargesActualUsage() {
 		BudgetService service = service(EnforcementMode.ENFORCE, USER_DAILY);
-		Reservation reservation = reservationOf(service.reserve(ALICE, MODEL, ESTIMATE));
+		Reservation reservation = reservationOf(service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE));
 
 		service.settle(ALICE, reservation, MODEL, new TokenUsage(400, 100, 0, 0));
 
@@ -181,7 +183,7 @@ class BudgetServiceTest {
 	@Test
 	void settleChargesEstimateWhenUsageIsMissing() {
 		BudgetService service = service(EnforcementMode.ENFORCE, USER_DAILY);
-		Reservation reservation = reservationOf(service.reserve(ALICE, MODEL, ESTIMATE));
+		Reservation reservation = reservationOf(service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE));
 
 		service.settle(ALICE, reservation, MODEL, TokenUsage.ZERO);
 
@@ -191,7 +193,7 @@ class BudgetServiceTest {
 	@Test
 	void releaseDropsReservationWithoutCharging() {
 		BudgetService service = service(EnforcementMode.ENFORCE, USER_DAILY);
-		Reservation reservation = reservationOf(service.reserve(ALICE, MODEL, ESTIMATE));
+		Reservation reservation = reservationOf(service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE));
 
 		service.release(reservation, MODEL);
 
@@ -201,7 +203,8 @@ class BudgetServiceTest {
 	@Test
 	void budgetResetsInNextWindow() {
 		BudgetService service = service(EnforcementMode.ENFORCE, USER_DAILY);
-		service.settle(ALICE, reservationOf(service.reserve(ALICE, MODEL, ESTIMATE)), MODEL, new TokenUsage(1500, 500, 0, 0));
+		service.settle(ALICE, reservationOf(service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE)), MODEL,
+				new TokenUsage(1500, 500, 0, 0));
 		this.clock.advance(Duration.ofDays(1));
 
 		Decision decision = service.admit(ALICE);
@@ -213,7 +216,7 @@ class BudgetServiceTest {
 	void chargesCallToTheWindowItWasReservedIn() {
 		BudgetService service = service(EnforcementMode.ENFORCE, USER_DAILY);
 		this.clock.advance(Duration.ofHours(13).plusMinutes(59));
-		Reservation reservation = reservationOf(service.reserve(ALICE, MODEL, ESTIMATE));
+		Reservation reservation = reservationOf(service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE));
 		this.clock.advance(Duration.ofMinutes(2));
 
 		service.settle(ALICE, reservation, MODEL, new TokenUsage(400, 100, 0, 0));
@@ -230,10 +233,10 @@ class BudgetServiceTest {
 		InMemoryUsageLedger kolkataLedger = new InMemoryUsageLedger(this.clock, kolkata);
 		BudgetService service = new BudgetService(kolkataLedger, rejectingCatalog(), List.of(USER_DAILY),
 				EnforcementMode.ENFORCE, this.clock, kolkata);
-		service.reserve(ALICE, MODEL, ESTIMATE);
+		service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE);
 
 		// 10:00 UTC is 15:30 in India; the day there ends at 18:30 UTC
-		Decision decision = service.reserve(ALICE, MODEL, ESTIMATE);
+		Decision decision = service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE);
 
 		assertThat(decision).isEqualTo(
 				new Decision.Denied("user daily budget exceeded", Duration.ofHours(8).plusMinutes(30)));
@@ -243,7 +246,7 @@ class BudgetServiceTest {
 	void retryAfterForMonthlyLimitIsUntilFirstOfNextMonth() {
 		BudgetService service = service(EnforcementMode.ENFORCE, GLOBAL_MONTHLY);
 
-		Decision decision = service.reserve(ALICE, MODEL, new TokenUsage(10_001, 0, 0, 0));
+		Decision decision = service.reserve(ALICE, RequestLimit.NONE, MODEL, new TokenUsage(10_001, 0, 0, 0));
 
 		Duration untilNovember = Duration.between(START, Instant.parse("2026-11-01T00:00:00Z"));
 		assertThat(decision).isEqualTo(new Decision.Denied("global monthly budget exceeded", untilNovember));
@@ -253,9 +256,10 @@ class BudgetServiceTest {
 	void reportsTheFirstConfiguredLimitThatIsExceeded() {
 		TokenUsage overBoth = new TokenUsage(20_000, 0, 0, 0);
 
-		Decision userFirst = service(EnforcementMode.ENFORCE, USER_DAILY, GLOBAL_MONTHLY).reserve(ALICE, MODEL, overBoth);
-		Decision globalFirst = service(EnforcementMode.ENFORCE, GLOBAL_MONTHLY, USER_DAILY).reserve(ALICE, MODEL,
-				overBoth);
+		Decision userFirst = service(EnforcementMode.ENFORCE, USER_DAILY, GLOBAL_MONTHLY).reserve(ALICE,
+				RequestLimit.NONE, MODEL, overBoth);
+		Decision globalFirst = service(EnforcementMode.ENFORCE, GLOBAL_MONTHLY, USER_DAILY).reserve(ALICE,
+				RequestLimit.NONE, MODEL, overBoth);
 
 		assertThat(((Decision.Denied) userFirst).reason()).isEqualTo("user daily budget exceeded");
 		assertThat(((Decision.Denied) globalFirst).reason()).isEqualTo("global monthly budget exceeded");
@@ -265,7 +269,7 @@ class BudgetServiceTest {
 	void deniedReasonDoesNotNameTheSubject() {
 		BudgetService service = service(EnforcementMode.ENFORCE, USER_DAILY);
 
-		Decision decision = service.reserve(ALICE, MODEL, new TokenUsage(5000, 0, 0, 0));
+		Decision decision = service.reserve(ALICE, RequestLimit.NONE, MODEL, new TokenUsage(5000, 0, 0, 0));
 
 		assertThat(((Decision.Denied) decision).reason()).doesNotContain("alice");
 	}
@@ -275,7 +279,7 @@ class BudgetServiceTest {
 		Limit tenthOfACent = new Limit(Scope.USER, Window.DAILY, null, Money.ofDollars("0.001"));
 		BudgetService service = service(EnforcementMode.ENFORCE, tenthOfACent);
 
-		Decision decision = service.reserve(ALICE, MODEL, ESTIMATE);
+		Decision decision = service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE);
 
 		assertThat(decision).isInstanceOf(Decision.Denied.class);
 	}
@@ -285,9 +289,9 @@ class BudgetServiceTest {
 		PriceCatalog uncosted = new ConfiguredPriceCatalog(Map.of(), UnknownModelPolicy.ALLOW_UNCOSTED, null);
 		BudgetService service = new BudgetService(this.ledger, uncosted, List.of(USER_DAILY), EnforcementMode.ENFORCE,
 				this.clock, ZoneOffset.UTC);
-		service.reserve(ALICE, "other-model", ESTIMATE);
+		service.reserve(ALICE, RequestLimit.NONE, "other-model", ESTIMATE);
 
-		Decision decision = service.reserve(ALICE, "other-model", ESTIMATE);
+		Decision decision = service.reserve(ALICE, RequestLimit.NONE, "other-model", ESTIMATE);
 
 		assertThat(decision).isInstanceOf(Decision.Denied.class);
 	}
@@ -297,7 +301,7 @@ class BudgetServiceTest {
 		PriceCatalog withDefault = new ConfiguredPriceCatalog(Map.of(), UnknownModelPolicy.DEFAULT_PRICE, PRICE);
 		BudgetService service = new BudgetService(this.ledger, withDefault, List.of(USER_DAILY),
 				EnforcementMode.ENFORCE, this.clock, ZoneOffset.UTC);
-		Reservation reservation = reservationOf(service.reserve(ALICE, "other-model", ESTIMATE));
+		Reservation reservation = reservationOf(service.reserve(ALICE, RequestLimit.NONE, "other-model", ESTIMATE));
 
 		service.settle(ALICE, reservation, "other-model", new TokenUsage(400, 100, 0, 0));
 
@@ -308,8 +312,8 @@ class BudgetServiceTest {
 	@Test
 	void observeModeReservationOverLimitSettlesNormally() {
 		BudgetService service = service(EnforcementMode.OBSERVE, USER_DAILY);
-		service.reserve(ALICE, MODEL, ESTIMATE);
-		Reservation overLimit = reservationOf(service.reserve(ALICE, MODEL, ESTIMATE));
+		service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE);
+		Reservation overLimit = reservationOf(service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE));
 
 		service.settle(ALICE, overLimit, MODEL, new TokenUsage(400, 100, 0, 0));
 
@@ -322,7 +326,8 @@ class BudgetServiceTest {
 		BudgetService service = service(EnforcementMode.ENFORCE);
 
 		Decision admission = service.admit(ALICE);
-		Reservation reservation = reservationOf(service.reserve(ALICE, MODEL, new TokenUsage(1_000_000, 0, 0, 0)));
+		Reservation reservation = reservationOf(service.reserve(ALICE, RequestLimit.NONE, MODEL,
+				new TokenUsage(1_000_000, 0, 0, 0)));
 		service.settle(ALICE, reservation, MODEL, ESTIMATE);
 
 		assertThat(admission).isEqualTo(new Decision.Allowed());
@@ -341,7 +346,7 @@ class BudgetServiceTest {
 				Caller user = new Caller(Map.of(Scope.USER, "user-" + (i % USERS)), null);
 				results.add(pool.submit(() -> {
 					start.await();
-					return service.reserve(user, MODEL, new TokenUsage(1000, 0, 0, 0));
+					return service.reserve(user, RequestLimit.NONE, MODEL, new TokenUsage(1000, 0, 0, 0));
 				}));
 			}
 			start.countDown();
@@ -417,7 +422,7 @@ class BudgetServiceTest {
 	@Test
 	void settleReturnsChargedAmount() {
 		BudgetService service = service(EnforcementMode.ENFORCE, USER_DAILY);
-		Reservation reservation = reservationOf(service.reserve(ALICE, MODEL, ESTIMATE));
+		Reservation reservation = reservationOf(service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE));
 
 		Amount charged = service.settle(ALICE, reservation, MODEL, new TokenUsage(400, 100, 0, 0));
 
@@ -427,7 +432,7 @@ class BudgetServiceTest {
 	@Test
 	void settleReturnsEstimateWhenUsageIsMissing() {
 		BudgetService service = service(EnforcementMode.ENFORCE, USER_DAILY);
-		Reservation reservation = reservationOf(service.reserve(ALICE, MODEL, ESTIMATE));
+		Reservation reservation = reservationOf(service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE));
 
 		assertThat(service.settle(ALICE, reservation, MODEL, TokenUsage.ZERO)).isEqualTo(ESTIMATE_AMOUNT);
 	}
@@ -450,7 +455,7 @@ class BudgetServiceTest {
 	void reservesUntrackedEstimateWhenLedgerUnavailableAndFailOpen() {
 		BudgetService service = unavailable(LedgerFailureMode.FAIL_OPEN);
 
-		Reservation reservation = reservationOf(service.reserve(ALICE, MODEL, ESTIMATE));
+		Reservation reservation = reservationOf(service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE));
 
 		assertThat(reservation.amount()).isEqualTo(ESTIMATE_AMOUNT);
 		assertThat(reservation.keys()).containsExactly(ALICE_TODAY);
@@ -460,15 +465,36 @@ class BudgetServiceTest {
 	void reserveThrowsWhenLedgerUnavailableAndFailClosed() {
 		BudgetService service = unavailable(LedgerFailureMode.FAIL_CLOSED);
 
-		assertThatThrownBy(() -> service.reserve(ALICE, MODEL, ESTIMATE))
+		assertThatThrownBy(() -> service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE))
 			.isInstanceOf(LedgerUnavailableException.class);
+	}
+
+	@Test
+	void countsUnknownModelWithoutCostWhenNoCostCapApplies() {
+		BudgetService service = service(EnforcementMode.ENFORCE, GLOBAL_MONTHLY);
+		BudgetKey globalKey = BudgetKey.of(Scope.GLOBAL, BudgetKey.GLOBAL_SUBJECT, Window.MONTHLY, START,
+				ZoneOffset.UTC);
+
+		Reservation reservation = reservationOf(service.reserve(ALICE, RequestLimit.NONE, "other-model", ESTIMATE));
+		service.settle(ALICE, reservation, "other-model", new TokenUsage(400, 100, 0, 0));
+
+		assertThat(this.ledger.current(globalKey).committed()).isEqualTo(new Amount(500, Money.ZERO));
+	}
+
+	@Test
+	void rejectsUnknownModelWhenRequestCostCapApplies() {
+		BudgetService service = service(EnforcementMode.ENFORCE, GLOBAL_MONTHLY);
+		RequestLimit costCapped = new RequestLimit(null, Money.ofDollars("0.10"));
+
+		assertThatThrownBy(() -> service.reserve(ALICE, costCapped, "other-model", ESTIMATE))
+			.isInstanceOf(UnknownModelException.class);
 	}
 
 	@Test
 	void rejectsUnknownModelEvenWhenLedgerUnavailable() {
 		BudgetService service = unavailable(LedgerFailureMode.FAIL_OPEN);
 
-		assertThatThrownBy(() -> service.reserve(ALICE, "other-model", ESTIMATE))
+		assertThatThrownBy(() -> service.reserve(ALICE, RequestLimit.NONE, "other-model", ESTIMATE))
 			.isInstanceOf(UnknownModelException.class);
 	}
 
@@ -503,7 +529,8 @@ class BudgetServiceTest {
 	@Test
 	void notifiesDeniedAdmissionWithScopeOfUsedUpBudget() {
 		BudgetService service = listened(EnforcementMode.ENFORCE, this.ledger, LedgerFailureMode.FAIL_CLOSED);
-		service.settle(ALICE, reservationOf(service.reserve(ALICE, MODEL, ESTIMATE)), MODEL, new TokenUsage(1500, 500, 0, 0));
+		service.settle(ALICE, reservationOf(service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE)), MODEL,
+				new TokenUsage(1500, 500, 0, 0));
 
 		service.admit(ALICE);
 
@@ -514,7 +541,8 @@ class BudgetServiceTest {
 	@Test
 	void notifiesObservedAdmissionInObserveMode() {
 		BudgetService service = listened(EnforcementMode.OBSERVE, this.ledger, LedgerFailureMode.FAIL_OPEN);
-		service.settle(ALICE, reservationOf(service.reserve(ALICE, MODEL, ESTIMATE)), MODEL, new TokenUsage(1500, 500, 0, 0));
+		service.settle(ALICE, reservationOf(service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE)), MODEL,
+				new TokenUsage(1500, 500, 0, 0));
 
 		service.admit(ALICE);
 
@@ -550,8 +578,8 @@ class BudgetServiceTest {
 	void notifiesAllowedThenDeniedReservation() {
 		BudgetService service = listened(EnforcementMode.ENFORCE, this.ledger, LedgerFailureMode.FAIL_CLOSED);
 
-		service.reserve(ALICE, MODEL, ESTIMATE);
-		service.reserve(ALICE, MODEL, ESTIMATE);
+		service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE);
+		service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE);
 
 		assertThat(this.listener.decisions).containsExactly(
 				new DecisionMade(DecisionMade.Stage.RESERVATION, DecisionMade.Outcome.ALLOWED, null),
@@ -562,8 +590,8 @@ class BudgetServiceTest {
 	void notifiesObservedReservationInObserveMode() {
 		BudgetService service = listened(EnforcementMode.OBSERVE, this.ledger, LedgerFailureMode.FAIL_OPEN);
 
-		service.reserve(ALICE, MODEL, ESTIMATE);
-		service.reserve(ALICE, MODEL, ESTIMATE);
+		service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE);
+		service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE);
 
 		assertThat(this.listener.decisions).last()
 			.isEqualTo(new DecisionMade(DecisionMade.Stage.RESERVATION, DecisionMade.Outcome.OBSERVED, Scope.USER));
@@ -572,7 +600,7 @@ class BudgetServiceTest {
 	@Test
 	void notifiesChargedCallWithReportedUsage() {
 		BudgetService service = listened(EnforcementMode.ENFORCE, this.ledger, LedgerFailureMode.FAIL_CLOSED);
-		Reservation reservation = reservationOf(service.reserve(ALICE, MODEL, ESTIMATE));
+		Reservation reservation = reservationOf(service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE));
 		TokenUsage reported = new TokenUsage(800, 200, 0, 0);
 
 		Amount charged = service.settle(ALICE, reservation, MODEL, reported);
@@ -584,7 +612,7 @@ class BudgetServiceTest {
 	@Test
 	void notifiesEstimateChargedWhenUsageIsMissing() {
 		BudgetService service = listened(EnforcementMode.ENFORCE, this.ledger, LedgerFailureMode.FAIL_CLOSED);
-		Reservation reservation = reservationOf(service.reserve(ALICE, MODEL, ESTIMATE));
+		Reservation reservation = reservationOf(service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE));
 
 		service.settle(ALICE, reservation, MODEL, TokenUsage.ZERO);
 
@@ -595,7 +623,7 @@ class BudgetServiceTest {
 	@Test
 	void notifiesReleasedCallWithoutCharge() {
 		BudgetService service = listened(EnforcementMode.ENFORCE, this.ledger, LedgerFailureMode.FAIL_CLOSED);
-		Reservation reservation = reservationOf(service.reserve(ALICE, MODEL, ESTIMATE));
+		Reservation reservation = reservationOf(service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE));
 
 		service.release(reservation, MODEL);
 
@@ -619,7 +647,7 @@ class BudgetServiceTest {
 	@Test
 	void notifiesWhenCallTakesSpendToThreshold() {
 		BudgetService service = alerting(List.of(80), EnforcementMode.ENFORCE, this.ledger);
-		Reservation reservation = reservationOf(service.reserve(ALICE, MODEL, ESTIMATE));
+		Reservation reservation = reservationOf(service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE));
 
 		// 1,600 of 2,000 tokens is 80%; 1,100 input at $1/MTok plus 500 output at $2/MTok is $0.0021.
 		service.settle(ALICE, reservation, MODEL, new TokenUsage(1100, 500, 0, 0));
@@ -685,7 +713,7 @@ class BudgetServiceTest {
 	@Test
 	void noThresholdEventWhenSettledTwice() {
 		BudgetService service = alerting(List.of(80), EnforcementMode.ENFORCE, this.ledger);
-		Reservation reservation = reservationOf(service.reserve(ALICE, MODEL, ESTIMATE));
+		Reservation reservation = reservationOf(service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE));
 
 		service.settle(ALICE, reservation, MODEL, new TokenUsage(1600, 0, 0, 0));
 		service.settle(ALICE, reservation, MODEL, new TokenUsage(1600, 0, 0, 0));
@@ -703,8 +731,9 @@ class BudgetServiceTest {
 	@Test
 	void statusShowsCommittedAndReservedSpendWithResetTime() {
 		BudgetService service = service(EnforcementMode.ENFORCE, USER_DAILY);
-		service.settle(ALICE, reservationOf(service.reserve(ALICE, MODEL, ESTIMATE)), MODEL, new TokenUsage(800, 200, 0, 0));
-		service.reserve(ALICE, MODEL, new TokenUsage(500, 250, 0, 0));
+		service.settle(ALICE, reservationOf(service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE)), MODEL,
+				new TokenUsage(800, 200, 0, 0));
+		service.reserve(ALICE, RequestLimit.NONE, MODEL, new TokenUsage(500, 250, 0, 0));
 
 		List<BudgetStatus> status = service.statusOf(Scope.USER, "alice", null);
 
@@ -733,7 +762,7 @@ class BudgetServiceTest {
 	@Test
 	void globalStatusIgnoresSubjectId() {
 		BudgetService service = service(EnforcementMode.ENFORCE, GLOBAL_MONTHLY);
-		service.reserve(ALICE, MODEL, ESTIMATE);
+		service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE);
 
 		List<BudgetStatus> status = service.statusOf(Scope.GLOBAL, "anyone", null);
 
@@ -755,7 +784,7 @@ class BudgetServiceTest {
 	void reservesAgainstTheCallersPlanCap() {
 		BudgetService service = planned();
 
-		Decision decision = service.reserve(ALICE_ON_PRO, MODEL, new TokenUsage(5000, 0, 0, 0));
+		Decision decision = service.reserve(ALICE_ON_PRO, RequestLimit.NONE, MODEL, new TokenUsage(5000, 0, 0, 0));
 
 		assertThat(decision).isInstanceOf(Decision.Reserved.class);
 	}
@@ -768,7 +797,7 @@ class BudgetServiceTest {
 				List.of(), List.of());
 		Caller acme = new Caller(Map.of(Scope.TENANT, "acme"), null);
 
-		Reservation reservation = reservationOf(service.reserve(acme, MODEL, ESTIMATE));
+		Reservation reservation = reservationOf(service.reserve(acme, RequestLimit.NONE, MODEL, ESTIMATE));
 
 		assertThat(reservation.keys())
 			.containsExactly(BudgetKey.of(Scope.TENANT, "acme", Window.MONTHLY, START, ZoneOffset.UTC));
@@ -858,7 +887,7 @@ class BudgetServiceTest {
 	void resetKeepsReservationsOfCallsInFlight() {
 		BudgetService service = service(EnforcementMode.ENFORCE, USER_DAILY);
 		charge(service, 400);
-		service.reserve(ALICE, MODEL, ESTIMATE);
+		service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE);
 
 		service.reset(Scope.USER, "alice");
 
@@ -883,7 +912,7 @@ class BudgetServiceTest {
 
 	private static void charge(BudgetService service, Caller caller, long inputTokens) {
 		TokenUsage usage = new TokenUsage(inputTokens, 0, 0, 0);
-		service.settle(caller, reservationOf(service.reserve(caller, MODEL, usage)), MODEL, usage);
+		service.settle(caller, reservationOf(service.reserve(caller, RequestLimit.NONE, MODEL, usage)), MODEL, usage);
 	}
 
 	/** Free callers get {@link #USER_DAILY}, pro callers {@link #PRO_USER_DAILY}; thresholds at 80%. */

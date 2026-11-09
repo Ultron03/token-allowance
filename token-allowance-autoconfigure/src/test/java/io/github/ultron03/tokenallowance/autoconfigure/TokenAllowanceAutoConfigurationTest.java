@@ -47,6 +47,7 @@ import io.github.ultron03.tokenallowance.core.LedgerUnavailableException;
 import io.github.ultron03.tokenallowance.core.Limit;
 import io.github.ultron03.tokenallowance.core.LimitResolver;
 import io.github.ultron03.tokenallowance.core.PriceCatalog;
+import io.github.ultron03.tokenallowance.core.RequestLimit;
 import io.github.ultron03.tokenallowance.core.Reservation;
 import io.github.ultron03.tokenallowance.core.ReservationResult;
 import io.github.ultron03.tokenallowance.core.Scope;
@@ -166,6 +167,16 @@ class TokenAllowanceAutoConfigurationTest {
 
 		runner.withBean(UsageLedger.class, () -> ledger)
 			.run(context -> assertThat(context.getBean(UsageLedger.class)).isSameAs(ledger));
+	}
+
+	@Test
+	void tokenOnlyLimitsWorkWithoutPrices() {
+		runner.withPropertyValues(USER_DAILY_LIMIT).run(context -> {
+			BudgetService service = context.getBean(BudgetService.class);
+			chargeAlice(service, 1000);
+
+			assertThat(service.admit(ALICE)).isInstanceOf(Decision.Denied.class);
+		});
 	}
 
 	@Test
@@ -419,7 +430,7 @@ class TokenAllowanceAutoConfigurationTest {
 
 	private static void chargeAlice(BudgetService service, long inputTokens) {
 		TokenUsage usage = new TokenUsage(inputTokens, 0, 0, 0);
-		Decision decision = service.reserve(ALICE, "any-model", usage);
+		Decision decision = service.reserve(ALICE, RequestLimit.NONE, "any-model", usage);
 		service.settle(ALICE, ((Decision.Reserved) decision).reservation(), "any-model", usage);
 	}
 

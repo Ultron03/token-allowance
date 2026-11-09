@@ -5,6 +5,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -43,6 +44,8 @@ public class BudgetService {
 	private final RequestLimit requestLimit;
 
 	private final Set<String> modelsWithoutUsage;
+
+	private final Set<String> uncostedModels;
 
 	private final LedgerFailureMode failureMode;
 
@@ -114,6 +117,7 @@ public class BudgetService {
 		this.clock = clock;
 		this.zone = zone;
 		this.modelsWithoutUsage = ConcurrentHashMap.newKeySet();
+		this.uncostedModels = ConcurrentHashMap.newKeySet();
 		this.ledgerDown = new AtomicBoolean(false);
 		this.thresholds = List.copyOf(new TreeSet<>(thresholds));
 		this.listeners = List.copyOf(listeners);
@@ -202,20 +206,24 @@ public class BudgetService {
 
 	/**
 	 * Holds the estimate of one model call on every budget that applies to the caller.
+	 * @param endpointLimit the caps the endpoint set for its requests, used to tell whether a cost cap applies
 	 * @param model the model the call goes to, used to price the estimate
 	 * @param estimate the expected usage of the call
 	 * @return {@link Decision.Reserved}, or {@link Decision.Denied} in enforce mode
-	 * @throws UnknownModelException if the model has no price and the unknown-model policy rejects it
+	 * @throws UnknownModelException if the model has no price, the unknown-model policy rejects it, and a
+	 *         cost cap applies to the call; without one, its tokens are counted with no cost
 	 * @throws LedgerUnavailableException if the ledger can't be reached and the failure mode is fail-closed
 	 * @throws IllegalArgumentException if the caller's limits have two of one scope and window
 	 */
-	public Decision reserve(Caller caller, String model, TokenUsage estimate) {
+	public Decision reserve(Caller caller, RequestLimit endpointLimit, String model, TokenUsage estimate) {
 		Objects.requireNonNull(caller, "caller can't be null");
+		Objects.requireNonNull(endpointLimit, "endpointLimit can't be null");
 		Objects.requireNonNull(model, "model can't be null");
 		Objects.requireNonNull(estimate, "estimate can't be null");
 		Instant now = this.clock.instant();
 		Map<BudgetKey, Limit> keys = keysFor(caller, now);
-		Amount amount = new Amount(estimate.total(), costOf(model, estimate));
+		boolean costCapped = hasCostCap(keys.values(), endpointLimit.orElse(this.requestLimit));
+		Amount amount = new Amount(estimate.total(), costOf(model, estimate, costCapped));
 
 		try {
 			Decision decision = reserveOnLedger(keys, amount, now);
@@ -268,7 +276,8 @@ public class BudgetService {
 			charged = reservation.amount();
 		}
 		else {
-			charged = new Amount(actual.total(), costOf(model, actual));
+			// Reserve already accepted this model, so a missing price never fails the charge.
+			charged = new Amount(actual.total(), costOf(model, actual, false));
 		}
 
 		Map<BudgetKey, Amount> committedAfter = Map.of();
@@ -388,8 +397,28 @@ public class BudgetService {
 		return keys;
 	}
 
-	private Money costOf(String model, TokenUsage usage) {
-		return this.priceCatalog.priceFor(model).map(price -> price.costOf(usage)).orElse(Money.ZERO);
+	/** Prices usage; a model without a price is only rejected when a cost cap needs its cost. */
+	private Money costOf(String model, TokenUsage usage, boolean costCapped) {
+		try {
+			return this.priceCatalog.priceFor(model).map(price -> price.costOf(usage)).orElse(Money.ZERO);
+		}
+		catch (UnknownModelException ex) {
+			if (costCapped) {
+				throw ex;
+			}
+			warnUncostedOnce(model);
+			return Money.ZERO;
+		}
+	}
+
+	private static boolean hasCostCap(Collection<Limit> limits, RequestLimit requestLimit) {
+		return requestLimit.maxCost() != null || limits.stream().anyMatch(limit -> limit.maxCost() != null);
+	}
+
+	private void warnUncostedOnce(String model) {
+		if (this.uncostedModels.add(model)) {
+			log.warn("Model '{}' has no price and no cost cap applies, so its tokens are counted without cost", model);
+		}
 	}
 
 	private Decision.Denied denied(BudgetKey key, Instant now) {

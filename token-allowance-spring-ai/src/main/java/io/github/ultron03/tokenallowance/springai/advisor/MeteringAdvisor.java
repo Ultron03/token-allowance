@@ -129,7 +129,7 @@ public class MeteringAdvisor implements CallAdvisor, StreamAdvisor {
 	}
 
 	private Reservation reserve(RequestBudgetContext context, String model, TokenUsage estimate) {
-		Decision decision = this.budgetService.reserve(context.caller(), model, estimate);
+		Decision decision = this.budgetService.reserve(context.caller(), context.endpointLimit(), model, estimate);
 		throwIfDenied(decision);
 		if (!(decision instanceof Decision.Reserved reserved)) {
 			throw new IllegalStateException("Expected a reservation but got " + decision);
