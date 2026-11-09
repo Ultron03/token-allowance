@@ -5,11 +5,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
+import org.jspecify.annotations.Nullable;
 import org.springframework.ai.chat.client.ChatClientRequest;
 
 import io.github.ultron03.tokenallowance.core.Scope;
 
-/** Asks several resolvers in priority order; for each scope the first resolver that finds an id wins. */
+/** Asks several resolvers in priority order; for each scope and for the plan, the first one that finds a value wins. */
 public class CompositeSubjectResolver implements SubjectResolver {
 
 	private final List<SubjectResolver> resolvers;
@@ -28,5 +29,17 @@ public class CompositeSubjectResolver implements SubjectResolver {
 			resolver.resolve(request).forEach(ids::putIfAbsent);
 		}
 		return Map.copyOf(ids);
+	}
+
+	/** Returns the plan of the first resolver that knows one. */
+	@Override
+	public @Nullable String resolvePlan(ChatClientRequest request) {
+		for (SubjectResolver resolver : this.resolvers) {
+			@Nullable String plan = resolver.resolvePlan(request);
+			if (plan != null) {
+				return plan;
+			}
+		}
+		return null;
 	}
 }

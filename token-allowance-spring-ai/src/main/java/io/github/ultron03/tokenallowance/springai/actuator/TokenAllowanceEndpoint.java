@@ -20,8 +20,8 @@ import io.github.ultron03.tokenallowance.core.Scope;
 
 /**
  * Shows where a user, tenant, session or the global budget stands in the current windows, at
- * {@code /actuator/tokenallowance/{scope}/{subjectId}}. Answers 404 when no limit is configured for
- * the scope.
+ * {@code /actuator/tokenallowance/{scope}/{subjectId}}, with the limits of {@code ?plan=} if given.
+ * Answers 404 when the scope has no limits.
  */
 @Endpoint(id = TokenAllowanceEndpoint.ID)
 public class TokenAllowanceEndpoint {
@@ -39,15 +39,16 @@ public class TokenAllowanceEndpoint {
 	/**
 	 * Reads the subject's spend and limits.
 	 * @param subjectId ignored for the global scope, which has one shared budget
+	 * @param plan the subject's plan, or null for the limits every caller has
 	 * @return the subject's budgets, or null if the scope has no limits
 	 */
 	@ReadOperation
-	public @Nullable SubjectBudgets budgets(@Selector Scope scope, @Selector String subjectId) {
-		List<BudgetStatus> statuses = this.budgetService.statusOf(scope, subjectId);
+	public @Nullable SubjectBudgets budgets(@Selector Scope scope, @Selector String subjectId, @Nullable String plan) {
+		List<BudgetStatus> statuses = this.budgetService.statusOf(scope, subjectId, plan);
 		if (statuses.isEmpty()) {
 			return null;
 		}
-		return new SubjectBudgets(lowerCase(scope), subjectId,
+		return new SubjectBudgets(lowerCase(scope), subjectId, plan,
 				statuses.stream().map(BudgetDescriptor::of).toList());
 	}
 
@@ -60,9 +61,10 @@ public class TokenAllowanceEndpoint {
 	 *
 	 * @param scope the scope asked for
 	 * @param subjectId the subject asked for
+	 * @param plan the plan asked for, or null for the limits every caller has
 	 * @param budgets one entry per limit of the scope
 	 */
-	public record SubjectBudgets(String scope, String subjectId, List<BudgetDescriptor> budgets)
+	public record SubjectBudgets(String scope, String subjectId, @Nullable String plan, List<BudgetDescriptor> budgets)
 			implements OperationResponseBody {
 	}
 

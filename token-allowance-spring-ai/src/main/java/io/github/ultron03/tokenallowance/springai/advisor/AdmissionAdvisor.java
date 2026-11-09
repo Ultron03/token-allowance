@@ -15,7 +15,9 @@ import org.springframework.ai.chat.client.advisor.api.StreamAdvisorChain;
 import org.springframework.core.Ordered;
 
 import io.github.ultron03.tokenallowance.core.BudgetService;
+import io.github.ultron03.tokenallowance.core.Caller;
 import io.github.ultron03.tokenallowance.core.Decision;
+import io.github.ultron03.tokenallowance.core.RequestLimit;
 import io.github.ultron03.tokenallowance.core.Scope;
 import io.github.ultron03.tokenallowance.springai.BudgetExceededException;
 import io.github.ultron03.tokenallowance.springai.subject.SubjectParams;
@@ -58,7 +60,10 @@ public class AdmissionAdvisor implements CallAdvisor, StreamAdvisor {
 		return ORDER;
 	}
 
-	/** @throws BudgetExceededException if a budget is used up; the model is not called */
+	/**
+	 * @throws BudgetExceededException if a budget is used up; the model is not called
+	 * @throws IllegalArgumentException if a {@link RequestLimitParams} param is not a valid cap
+	 */
 	@Override
 	public ChatClientResponse adviseCall(ChatClientRequest request, CallAdvisorChain chain) {
 		return chain.nextCall(admit(request));
@@ -78,16 +83,18 @@ public class AdmissionAdvisor implements CallAdvisor, StreamAdvisor {
 	}
 
 	private ChatClientRequest admit(ChatClientRequest request) {
+		RequestLimit endpointLimit = RequestLimitParams.of(request);
 		Map<Scope, String> subjectIds = this.subjectResolver.resolve(request);
 		if (subjectIds.isEmpty()) {
 			warnNoSubjectOnce();
 		}
-		Decision decision = this.budgetService.admit(subjectIds);
+		Caller caller = new Caller(subjectIds, this.subjectResolver.resolvePlan(request));
+		Decision decision = this.budgetService.admit(caller);
 		if (decision instanceof Decision.Denied denied) {
 			throw new BudgetExceededException(denied);
 		}
 		return request.mutate()
-			.context(RequestBudgetContext.CONTEXT_KEY, new RequestBudgetContext(subjectIds))
+			.context(RequestBudgetContext.CONTEXT_KEY, new RequestBudgetContext(caller, endpointLimit))
 			.build();
 	}
 

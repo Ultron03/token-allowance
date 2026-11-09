@@ -61,6 +61,13 @@ class RedisKeysTest {
 	}
 
 	@Test
+	void expiresMinuteKeyOneHourAfterWindowEnd() {
+		BudgetKey key = BudgetKey.of(Scope.USER, "alice", Window.MINUTE, NOW, ZoneOffset.UTC);
+
+		assertThat(RedisKeys.expiresAt(key, ZoneOffset.UTC)).isEqualTo(Instant.parse("2026-10-31T13:01:00Z"));
+	}
+
+	@Test
 	void buildsReservationKey() {
 		assertThat(RedisKeys.reservation("3f2a")).isEqualTo("{ta}:reservation:3f2a");
 	}

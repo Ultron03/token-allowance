@@ -165,13 +165,25 @@ class InMemoryUsageLedgerTest {
 	}
 
 	@Test
-	void evictsEndedWindowsOnceADay() {
+	void evictsEndedDailyWindowsNextDay() {
 		this.ledger.commit(reserve(amount(30, "0.30")), amount(30, "0.30"));
 		this.clock.advance(Duration.ofDays(1));
 
 		reserveTomorrow();
 
 		assertThat(this.ledger.current(USER_KEY)).isEqualTo(Spend.ZERO);
+	}
+
+	@Test
+	void evictsEndedMinuteWindowsWithinAMinute() {
+		BudgetKey thisMinute = BudgetKey.of(Scope.USER, "alice", Window.MINUTE, START, ZoneOffset.UTC);
+		Limit perMinute = new Limit(Scope.USER, Window.MINUTE, 100L, null);
+		this.ledger.commit(reserveOn(Map.of(thisMinute, perMinute), amount(30, "0.30")), amount(30, "0.30"));
+		this.clock.advance(Duration.ofMinutes(1));
+
+		reserve(amount(1, "0.01"));
+
+		assertThat(this.ledger.current(thisMinute)).isEqualTo(Spend.ZERO);
 	}
 
 	@Test
@@ -194,6 +206,25 @@ class InMemoryUsageLedgerTest {
 		this.ledger.commit(reservation, amount(30, "0.30"));
 
 		assertThat(this.ledger.current(USER_KEY)).isEqualTo(new Spend(amount(30, "0.30"), Amount.ZERO));
+	}
+
+	@Test
+	void refundLowersCommittedSpendAndKeepsReservations() {
+		this.ledger.commit(reserve(amount(30, "0.30")), amount(30, "0.30"));
+		reserve(amount(10, "0.10"));
+
+		this.ledger.refund(USER_KEY, amount(20, "0.25"));
+
+		assertThat(this.ledger.current(USER_KEY)).isEqualTo(new Spend(amount(10, "0.05"), amount(10, "0.10")));
+	}
+
+	@Test
+	void refundNeverTakesCommittedSpendBelowZero() {
+		this.ledger.commit(reserve(amount(30, "0.30")), amount(30, "0.30"));
+
+		this.ledger.refund(USER_KEY, amount(50, "0.10"));
+
+		assertThat(this.ledger.current(USER_KEY).committed()).isEqualTo(amount(0, "0.20"));
 	}
 
 	@Test

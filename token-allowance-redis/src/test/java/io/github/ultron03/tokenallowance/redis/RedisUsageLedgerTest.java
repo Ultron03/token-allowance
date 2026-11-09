@@ -133,6 +133,32 @@ class RedisUsageLedgerTest extends RedisTestSupport {
 	}
 
 	@Test
+	void refundLowersCommittedSpendAndKeepsReservations() {
+		this.ledger.commit(this.ledger.reserveUnchecked(Set.of(this.alice), ESTIMATE), ACTUAL);
+		this.ledger.reserveUnchecked(Set.of(this.alice), ESTIMATE);
+
+		this.ledger.refund(this.alice, new Amount(100, new Money(200)));
+
+		assertThat(this.ledger.current(this.alice)).isEqualTo(new Spend(new Amount(200, Money.ZERO), ESTIMATE));
+	}
+
+	@Test
+	void refundOfUnknownKeyCreatesNoKey() {
+		this.ledger.refund(this.alice, ACTUAL);
+
+		assertThat(redisTemplate.hasKey(RedisKeys.budget(this.alice))).isFalse();
+	}
+
+	@Test
+	void refundKeepsExpiry() {
+		this.ledger.commit(this.ledger.reserveUnchecked(Set.of(this.alice), ESTIMATE), ACTUAL);
+
+		this.ledger.refund(this.alice, ACTUAL);
+
+		assertThat(redisTemplate.getExpire(RedisKeys.budget(this.alice))).isPositive();
+	}
+
+	@Test
 	void currentIsZeroForUnknownKey() {
 		assertThat(this.ledger.current(this.alice)).isEqualTo(Spend.ZERO);
 	}

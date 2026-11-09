@@ -46,6 +46,7 @@ class TokenAllowancePropertiesTest {
 		assertThat(properties.pricing().defaultPrice()).isNull();
 		assertThat(properties.pricing().models()).isEmpty();
 		assertThat(properties.limits()).isEmpty();
+		assertThat(properties.plans()).isEmpty();
 		assertThat(properties.perRequest().maxModelCalls()).isNull();
 		assertThat(properties.perRequest().maxCost()).isNull();
 		assertThat(properties.stream().interrupted()).isEqualTo(InterruptedStreamPolicy.CHARGE_ESTIMATE);
@@ -91,6 +92,29 @@ class TokenAllowancePropertiesTest {
 		assertThat(limit.window()).isEqualTo(Window.DAILY);
 		assertThat(limit.maxTokens()).isNull();
 		assertThat(limit.maxCost()).isEqualByComparingTo("1.00");
+	}
+
+	@Test
+	void bindsPlanLimitsWithMinuteWindow() {
+		TokenAllowanceProperties properties = bind(Map.of(
+				"token-allowance.plans.pro[0].scope", "user",
+				"token-allowance.plans.pro[0].window", "minute",
+				"token-allowance.plans.pro[0].max-tokens", "20000"));
+
+		assertThat(properties.plans().get("pro")).singleElement()
+			.extracting(LimitProperties::window)
+			.isEqualTo(Window.MINUTE);
+	}
+
+	@Test
+	void rejectsPlanLimitWithoutScope() {
+		assertThatThrownBy(() -> bind(Map.of(
+				"token-allowance.plans.pro[0].window", "daily",
+				"token-allowance.plans.pro[0].max-cost", "1.00")))
+			.isInstanceOf(BindException.class)
+			.rootCause()
+			.isInstanceOf(BindValidationException.class)
+			.hasMessageContaining("scope");
 	}
 
 	@Test

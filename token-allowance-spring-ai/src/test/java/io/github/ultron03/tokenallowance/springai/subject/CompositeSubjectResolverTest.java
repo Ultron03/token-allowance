@@ -36,11 +36,36 @@ class CompositeSubjectResolverTest {
 	}
 
 	@Test
+	void firstResolverThatKnowsThePlanWins() {
+		CompositeSubjectResolver composite = new CompositeSubjectResolver(List.of(
+				request -> Map.of(),
+				planResolver("pro"),
+				planResolver("free")));
+
+		assertThat(composite.resolvePlan(this.request)).isEqualTo("pro");
+	}
+
+	@Test
 	void returnsEmptyWhenNoResolverFindsAnything() {
 		CompositeSubjectResolver composite = new CompositeSubjectResolver(List.of(
 				request -> Map.of(),
 				request -> Map.of()));
 
 		assertThat(composite.resolve(this.request)).isEmpty();
+	}
+
+	private static SubjectResolver planResolver(String plan) {
+		return new SubjectResolver() {
+
+			@Override
+			public Map<Scope, String> resolve(ChatClientRequest request) {
+				return Map.of();
+			}
+
+			@Override
+			public String resolvePlan(ChatClientRequest request) {
+				return plan;
+			}
+		};
 	}
 }

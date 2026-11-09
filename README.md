@@ -165,6 +165,74 @@ Budgets with scope `user`, `tenant` or `session` need an id. For each scope, the
 
 A request with no id is only checked against `global` budgets.
 
+## Plans
+
+Users on different plans can get different budgets. `limits` apply to everyone; a plan lists only what differs. A plan's limit replaces the common limit with the same scope and window, and any other plan limit is added:
+
+```yaml
+token-allowance:
+  limits:
+    - { scope: user, window: daily, max-cost: "1.00" }
+    - { scope: global, window: monthly, max-cost: "200.00" }
+  plans:
+    pro:
+      - { scope: user, window: daily, max-cost: "10.00" }
+      - { scope: user, window: minute, max-tokens: 20000 }
+```
+
+A `pro` user gets $10 a day, at most 20,000 tokens a minute, and shares the global $200. Plans can't set `global` limits, since there is one global budget for everyone.
+
+The plan comes from, in this order:
+
+1. **The `SubjectParams.PLAN` advisor param**: `.advisors(a -> a.param(SubjectParams.PLAN, "pro"))`.
+2. **A Spring Security authority** named `PLAN_<name>`, for example `PLAN_pro`, set when the user logs in.
+
+Never from a header, because a client could claim any plan. Plan names match ignoring case. A caller with no plan, or with a plan that isn't configured, gets the common `limits`; an unknown plan is logged once.
+
+Spend is counted per user, not per plan. When Alice upgrades from free to pro after spending $0.80 today, she has $9.20 left, not a fresh $10. To give her a fresh start, [reset her budget](#giving-budget-back).
+
+A login authority is fixed until the user logs in again. If your app changes plans while users are logged in, or keeps a customer's cap in its own database, replace the limits instead:
+
+```java
+@Bean
+LimitResolver limitResolver(ContractRepository contracts) {
+    return caller -> {
+        String tenantId = caller.subjectIds().get(Scope.TENANT);
+        if (tenantId == null) {
+            return List.of();
+        }
+        Money monthlyCap = contracts.monthlyCapOf(tenantId);
+        return List.of(new Limit(Scope.TENANT, Window.MONTHLY, null, monthlyCap));
+    };
+}
+```
+
+The resolver is asked before every model call and when the call is charged, so cache slow lookups. It must return at most one limit per scope and window.
+
+## Per-endpoint request caps
+
+`per-request.max-model-calls` and `per-request.max-cost` apply to every request. An endpoint whose requests need a different cap, such as an agent that walks a tool loop, sets its own on its client:
+
+```java
+ChatClient agentClient = chatClientBuilder
+    .defaultAdvisors(a -> a.param(RequestLimitParams.MAX_MODEL_CALLS, 20)
+        .param(RequestLimitParams.MAX_REQUEST_COST, "0.50"))
+    .build();
+```
+
+A cap the endpoint doesn't set comes from `per-request`. The same params work on a single call with `.advisors(..)`.
+
+## Giving budget back
+
+Support can give back spend that a bug burnt, through the `BudgetService` bean:
+
+```java
+budgetService.topUp(Scope.USER, "alice", new Amount(0, Money.ofDollars("2.00")));
+budgetService.reset(Scope.USER, "alice");
+```
+
+`topUp` takes the amount off her committed spend, never below zero; `reset` clears it. Both apply to the current minute, hour, day and month windows, and both work with the in-memory and the Redis store. Calls still running keep their reservations, and a call that finishes while `reset` runs stays charged. Neither has an HTTP endpoint; expose them through your own admin API if you need one.
+
 ## Configuration reference
 
 All properties start with `token-allowance.`. Amounts are in dollars; write them as strings (`"0.50"`) so YAML doesn't turn them into floating-point numbers.
@@ -173,7 +241,7 @@ All properties start with `token-allowance.`. Amounts are in dollars; write them
 |---|---|---|
 | `enabled` | `true` | Turns everything off when `false`. |
 | `mode` | `enforce` | `enforce` denies requests over budget; `observe` only logs them. |
-| `zone` | `UTC` | Time zone in which daily and monthly windows start. |
+| `zone` | `UTC` | Time zone in which hour, day and month windows start. |
 | `subject.header` | `X-User-Id` | HTTP header with the user id. |
 | `pricing.unknown-model` | `reject` | A model with no price: `reject` fails the call, `allow-uncosted` counts its tokens but no cost, `default-price` uses `pricing.default-price`. |
 | `pricing.default-price.*` | none | Price for unknown models: `input-per-mtok`, `output-per-mtok`, optional `cached-input-per-mtok`, `cache-write-per-mtok`. |
@@ -183,9 +251,10 @@ All properties start with `token-allowance.`. Amounts are in dollars; write them
 | `pricing.models[n].cached-input-per-mtok` | input price | Price of input tokens read from the provider's cache. |
 | `pricing.models[n].cache-write-per-mtok` | input price | Price of input tokens written to the provider's cache. |
 | `limits[n].scope` | none | `user`, `tenant`, `session` or `global`. |
-| `limits[n].window` | none | `daily` or `monthly`. |
+| `limits[n].window` | none | `minute`, `hour`, `daily` or `monthly`. Windows are fixed: a minute window resets at :00 seconds. |
 | `limits[n].max-tokens` | none | Most tokens in one window. |
 | `limits[n].max-cost` | none | Most dollars in one window. Each limit needs `max-tokens`, `max-cost` or both. |
+| `plans.<name>[n].*` | none | Limits for callers on plan `<name>`, with the same fields as `limits` (see [Plans](#plans)). |
 | `per-request.max-model-calls` | none | Most model calls one request may make, tool-loop rounds included. |
 | `per-request.max-cost` | none | Most dollars one request may cost. |
 | `stream.interrupted` | `charge-estimate` | A stream that stops before the provider reports usage: `charge-estimate` charges the estimate, `release` charges nothing. |
@@ -260,12 +329,13 @@ management:
         include: health,tokenallowance
 ```
 
-`GET /actuator/tokenallowance/{scope}/{subjectId}`, for example `/actuator/tokenallowance/user/alice`:
+`GET /actuator/tokenallowance/{scope}/{subjectId}`, for example `/actuator/tokenallowance/user/alice`. Add `?plan=pro` to see the limits of a plan:
 
 ```json
 {
   "scope": "user",
   "subjectId": "alice",
+  "plan": null,
   "budgets": [
     {
       "window": "daily",
@@ -280,7 +350,7 @@ management:
 }
 ```
 
-There is one entry per limit configured for the scope. `committed` is what finished calls used; `reserved` is what calls still running hold. Costs are in US dollars. For the global budget, use any subject id, for example `/actuator/tokenallowance/global/all`. A scope without limits answers `404`.
+There is one entry per limit of the scope, for the plan asked for. A replaced `LimitResolver` is asked for a caller that has only this one id, so a resolver that needs the tenant to find a user's limits can't answer here. `committed` is what finished calls used; `reserved` is what calls still running hold. Costs are in US dollars. For the global budget, use any subject id, for example `/actuator/tokenallowance/global/all`. A scope without limits answers `404`.
 
 The endpoint shows any user's spend to whoever can reach it, so secure it like your other actuator endpoints.
 
@@ -334,8 +404,9 @@ Every bean steps aside when your app defines one of the same type:
 |---|---|
 | `TokenEstimator` | Count tokens exactly with your model's tokenizer. |
 | `PriceCatalog` | Load prices from somewhere other than properties. |
-| `UsageLedger` | Store spend somewhere other than memory or Redis. Throw `LedgerUnavailableException` when your store can't be reached, so the failure mode applies. `commit` returns each budget's committed spend after the charge, read in the same atomic step, so budget alerts fire exactly once. |
-| `SubjectResolver` | Find the user, tenant or session your own way. |
+| `LimitResolver` | Read limits from your own store, such as a customer's contract (see [Plans](#plans)). |
+| `UsageLedger` | Store spend somewhere other than memory or Redis. Throw `LedgerUnavailableException` when your store can't be reached, so the failure mode applies. `commit` returns each budget's committed spend after the charge, read in the same atomic step, so budget alerts fire exactly once. `refund` backs `topUp` and `reset`. |
+| `SubjectResolver` | Find the user, tenant, session or plan your own way. |
 | `Clock` | Control time in tests. |
 
 The builder customizer steps aside only for a bean named `tokenAllowanceChatClientBuilderCustomizer`, so your own `ChatClientBuilderCustomizer` beans work next to it.
@@ -352,6 +423,7 @@ ChatClient chatClient = ChatClient.builder(chatModel)
 
 - **Costs are estimates, not invoices.** They use the prices you configure and the usage the provider reports. Check them against your provider's bill.
 - **A budget can be exceeded a little.** Each call reserves an estimate first and is charged its real usage afterwards; the call has already happened, so that charge is never refused. With several calls in flight, a budget can go over by the difference between their estimates and their real usage. A request can go over its own `per-request.max-cost` by at most one call.
+- **Windows are fixed, not sliding.** A user can spend a full minute cap at 10:00:59 and another one at 10:01:00, so for a moment twice the cap goes through.
 - **In-memory spend is per instance.** With the default `store.type`, spend is lost on restart and each instance of your app has its own budgets. Use Redis to share them.
 - **A crashed instance leaves its estimates reserved.** If an instance stops between reserving and settling a call, that estimate stays counted in Redis until the budget's window ends.
 - **The pre-call token estimate is approximate.** The default estimator assumes one token per three characters, rounded up. For English and most code this is higher than the real count, which is the safe direction. For Chinese, Japanese and Korean text it can be about three times too low. Tool schemas and images are not counted. The output estimate is the request's max tokens, or 1,024 if none is set. After the call, the provider's token count replaces the estimate; the estimate is charged only when the provider reports no usage.

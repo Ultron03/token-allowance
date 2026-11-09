@@ -46,6 +46,9 @@ public final class RedisUsageLedger implements UsageLedger {
 	private static final RedisScript<Long> RESERVE = RedisScript
 		.of(new ClassPathResource("reserve.lua", RedisUsageLedger.class), Long.class);
 
+	private static final RedisScript<Long> REFUND = RedisScript
+		.of(new ClassPathResource("refund.lua", RedisUsageLedger.class), Long.class);
+
 	private static final long RESERVED = 0;
 
 	private static final String NO_CAP = "-1";
@@ -113,6 +116,19 @@ public final class RedisUsageLedger implements UsageLedger {
 			throw new LedgerUnavailableException(UNAVAILABLE, ex);
 		}
 		return new Spend(amount(values.get(0), values.get(1)), amount(values.get(2), values.get(3)));
+	}
+
+	@Override
+	public void refund(BudgetKey key, Amount amount) {
+		Objects.requireNonNull(key, "key can't be null");
+		Objects.requireNonNull(amount, "amount can't be null");
+		try {
+			this.redis.execute(REFUND, List.of(RedisKeys.budget(key)), String.valueOf(amount.tokens()),
+					String.valueOf(amount.cost().micros()));
+		}
+		catch (DataAccessResourceFailureException | QueryTimeoutException ex) {
+			throw new LedgerUnavailableException(UNAVAILABLE, ex);
+		}
 	}
 
 	private static void requireMatchingLimits(Map<BudgetKey, Limit> limits) {

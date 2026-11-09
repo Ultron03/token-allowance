@@ -33,14 +33,19 @@ import io.github.ultron03.tokenallowance.core.BudgetService;
 import io.github.ultron03.tokenallowance.core.ConfiguredPriceCatalog;
 import io.github.ultron03.tokenallowance.core.EnforcementMode;
 import io.github.ultron03.tokenallowance.core.InMemoryUsageLedger;
+import io.github.ultron03.tokenallowance.core.LedgerFailureMode;
 import io.github.ultron03.tokenallowance.core.Limit;
 import io.github.ultron03.tokenallowance.core.Money;
+import io.github.ultron03.tokenallowance.core.PlanLimits;
+import io.github.ultron03.tokenallowance.core.RequestLimit;
 import io.github.ultron03.tokenallowance.core.Scope;
 import io.github.ultron03.tokenallowance.core.UnknownModelPolicy;
 import io.github.ultron03.tokenallowance.core.Window;
 import io.github.ultron03.tokenallowance.springai.BudgetExceededException;
 import io.github.ultron03.tokenallowance.springai.fixture.FakeChatModel;
 import io.github.ultron03.tokenallowance.springai.fixture.ScriptedReply;
+import io.github.ultron03.tokenallowance.springai.subject.AdvisorParamSubjectResolver;
+import io.github.ultron03.tokenallowance.springai.subject.SubjectParams;
 import io.github.ultron03.tokenallowance.springai.subject.SubjectResolver;
 import reactor.core.publisher.Flux;
 
@@ -71,7 +76,7 @@ class AdmissionAdvisorTest {
 		client.prompt("hi").call().content();
 
 		assertThat(this.capturing.seen).singleElement()
-			.satisfies(context -> assertThat(context.subjectIds()).containsExactly(Map.entry(Scope.USER, "alice")));
+			.satisfies(context -> assertThat(context.caller().subjectIds()).containsExactly(Map.entry(Scope.USER, "alice")));
 	}
 
 	@Test
@@ -151,7 +156,7 @@ class AdmissionAdvisorTest {
 		client.prompt("hi").stream().content().collectList().block();
 
 		assertThat(this.capturing.seen).singleElement()
-			.satisfies(context -> assertThat(context.subjectIds()).containsEntry(Scope.USER, "alice"));
+			.satisfies(context -> assertThat(context.caller().subjectIds()).containsEntry(Scope.USER, "alice"));
 	}
 
 	@Test
@@ -187,6 +192,49 @@ class AdmissionAdvisorTest {
 			.isLessThan(ToolCallingAdvisor.DEFAULT_ORDER);
 	}
 
+	@Test
+	void admitsCallerOnPlanFromAdvisorParam() {
+		Limit proDaily = new Limit(Scope.USER, Window.DAILY, 10 * DAILY_TOKENS, null);
+		BudgetService service = new BudgetService(this.ledger, uncostedCatalog(),
+				new PlanLimits(List.of(USER_DAILY), Map.of("pro", List.of(proDaily))), RequestLimit.NONE,
+				EnforcementMode.ENFORCE, LedgerFailureMode.FAIL_CLOSED, this.clock, ZONE, List.of(), List.of());
+		ChatClient client = client(answering(), new AdvisorParamSubjectResolver(), service);
+		spend(Scope.USER, "alice", DAILY_TOKENS);
+
+		String answer = client.prompt("hi")
+			.advisors(a -> a.param(SubjectParams.USER_ID, "alice").param(SubjectParams.PLAN, "pro"))
+			.call()
+			.content();
+
+		assertThat(answer).isEqualTo("Hello there.");
+	}
+
+	@Test
+	void storesEndpointRequestCapsFromAdvisorParams() {
+		ChatClient client = client(answering(), ALICE, service(EnforcementMode.ENFORCE, USER_DAILY));
+
+		client.prompt("hi")
+			.advisors(a -> a.param(RequestLimitParams.MAX_MODEL_CALLS, 10)
+				.param(RequestLimitParams.MAX_REQUEST_COST, "0.50"))
+			.call()
+			.content();
+
+		assertThat(this.capturing.seen).singleElement()
+			.extracting(RequestBudgetContext::endpointLimit)
+			.isEqualTo(new RequestLimit(10, Money.ofDollars("0.50")));
+	}
+
+	@Test
+	void rejectsRequestCapParamThatIsNotANumber() {
+		ChatClient client = client(answering(), ALICE, service(EnforcementMode.ENFORCE, USER_DAILY));
+
+		assertThatThrownBy(() -> client.prompt("hi")
+			.advisors(a -> a.param(RequestLimitParams.MAX_MODEL_CALLS, "ten"))
+			.call()
+			.content()).isInstanceOf(IllegalArgumentException.class)
+			.hasMessageContaining(RequestLimitParams.MAX_MODEL_CALLS);
+	}
+
 	private ChatClient client(FakeChatModel model, SubjectResolver resolver, BudgetService service) {
 		return ChatClient.builder(model)
 			.defaultAdvisors(new AdmissionAdvisor(resolver, service), this.capturing)
@@ -194,8 +242,11 @@ class AdmissionAdvisorTest {
 	}
 
 	private BudgetService service(EnforcementMode mode, Limit... limits) {
-		ConfiguredPriceCatalog catalog = new ConfiguredPriceCatalog(Map.of(), UnknownModelPolicy.ALLOW_UNCOSTED, null);
-		return new BudgetService(this.ledger, catalog, List.of(limits), mode, this.clock, ZONE);
+		return new BudgetService(this.ledger, uncostedCatalog(), List.of(limits), mode, this.clock, ZONE);
+	}
+
+	private static ConfiguredPriceCatalog uncostedCatalog() {
+		return new ConfiguredPriceCatalog(Map.of(), UnknownModelPolicy.ALLOW_UNCOSTED, null);
 	}
 
 	private void spend(Scope scope, String subjectId, long tokens) {

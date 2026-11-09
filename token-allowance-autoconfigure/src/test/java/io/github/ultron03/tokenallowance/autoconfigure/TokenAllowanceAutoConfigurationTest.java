@@ -38,12 +38,14 @@ import io.github.ultron03.tokenallowance.core.BudgetKey;
 import io.github.ultron03.tokenallowance.core.BudgetListener;
 import io.github.ultron03.tokenallowance.core.BudgetService;
 import io.github.ultron03.tokenallowance.core.BudgetThresholdReached;
+import io.github.ultron03.tokenallowance.core.Caller;
 import io.github.ultron03.tokenallowance.core.CallSettled;
 import io.github.ultron03.tokenallowance.core.Decision;
 import io.github.ultron03.tokenallowance.core.DecisionMade;
 import io.github.ultron03.tokenallowance.core.InMemoryUsageLedger;
 import io.github.ultron03.tokenallowance.core.LedgerUnavailableException;
 import io.github.ultron03.tokenallowance.core.Limit;
+import io.github.ultron03.tokenallowance.core.LimitResolver;
 import io.github.ultron03.tokenallowance.core.PriceCatalog;
 import io.github.ultron03.tokenallowance.core.Reservation;
 import io.github.ultron03.tokenallowance.core.ReservationResult;
@@ -52,6 +54,7 @@ import io.github.ultron03.tokenallowance.core.Spend;
 import io.github.ultron03.tokenallowance.core.TokenEstimator;
 import io.github.ultron03.tokenallowance.core.TokenUsage;
 import io.github.ultron03.tokenallowance.core.UsageLedger;
+import io.github.ultron03.tokenallowance.core.Window;
 import io.github.ultron03.tokenallowance.redis.RedisUsageLedger;
 import io.github.ultron03.tokenallowance.springai.actuator.TokenAllowanceEndpoint;
 import io.github.ultron03.tokenallowance.springai.advisor.AdmissionAdvisor;
@@ -68,7 +71,9 @@ class TokenAllowanceAutoConfigurationTest {
 	private static final String[] USER_DAILY_LIMIT = { "token-allowance.limits[0].scope=user",
 			"token-allowance.limits[0].window=daily", "token-allowance.limits[0].max-tokens=1000" };
 
-	private static final Map<Scope, String> ALICE = Map.of(Scope.USER, "alice");
+	private static final Caller ALICE = new Caller(Map.of(Scope.USER, "alice"), null);
+
+	private static final Caller ALICE_ON_PRO = new Caller(Map.of(Scope.USER, "alice"), "pro");
 
 	private static final String ALLOW_UNCOSTED = "token-allowance.pricing.unknown-model=allow-uncosted";
 
@@ -161,6 +166,44 @@ class TokenAllowanceAutoConfigurationTest {
 
 		runner.withBean(UsageLedger.class, () -> ledger)
 			.run(context -> assertThat(context.getBean(UsageLedger.class)).isSameAs(ledger));
+	}
+
+	@Test
+	void appliesPlanLimitsFromProperties() {
+		runner.withPropertyValues(USER_DAILY_LIMIT)
+			.withPropertyValues(ALLOW_UNCOSTED, "token-allowance.plans.pro[0].scope=user",
+					"token-allowance.plans.pro[0].window=daily", "token-allowance.plans.pro[0].max-tokens=5000")
+			.run(context -> {
+				BudgetService service = context.getBean(BudgetService.class);
+				chargeAlice(service, 1000);
+
+				assertThat(service.admit(ALICE)).isInstanceOf(Decision.Denied.class);
+				assertThat(service.admit(ALICE_ON_PRO)).isEqualTo(new Decision.Allowed());
+			});
+	}
+
+	@Test
+	void usesUserLimitResolver() {
+		LimitResolver contractCaps = caller -> List.of(new Limit(Scope.USER, Window.DAILY, 10L, null));
+
+		runner.withPropertyValues(ALLOW_UNCOSTED)
+			.withBean(LimitResolver.class, () -> contractCaps)
+			.run(context -> {
+				BudgetService service = context.getBean(BudgetService.class);
+				chargeAlice(service, 10);
+
+				assertThat(service.admit(ALICE)).isInstanceOf(Decision.Denied.class);
+			});
+	}
+
+	@Test
+	void failsStartupForGlobalLimitInPlan() {
+		runner.withPropertyValues("token-allowance.plans.pro[0].scope=global",
+				"token-allowance.plans.pro[0].window=daily", "token-allowance.plans.pro[0].max-tokens=5000")
+			.run(context -> {
+				assertThat(context).hasFailed();
+				assertThat(context.getStartupFailure()).hasStackTraceContaining("GLOBAL limit");
+			});
 	}
 
 	@Test
@@ -377,7 +420,7 @@ class TokenAllowanceAutoConfigurationTest {
 	private static void chargeAlice(BudgetService service, long inputTokens) {
 		TokenUsage usage = new TokenUsage(inputTokens, 0, 0, 0);
 		Decision decision = service.reserve(ALICE, "any-model", usage);
-		service.settle(((Decision.Reserved) decision).reservation(), "any-model", usage);
+		service.settle(ALICE, ((Decision.Reserved) decision).reservation(), "any-model", usage);
 	}
 
 	static class EventRecorder {
@@ -421,6 +464,11 @@ class TokenAllowanceAutoConfigurationTest {
 
 		@Override
 		public Spend current(BudgetKey key) {
+			throw down();
+		}
+
+		@Override
+		public void refund(BudgetKey key, Amount amount) {
 			throw down();
 		}
 

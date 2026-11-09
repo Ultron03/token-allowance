@@ -32,4 +32,14 @@ public class AdvisorParamSubjectResolver implements SubjectResolver {
 		}
 		return Map.copyOf(ids);
 	}
+
+	/** Returns the {@link SubjectParams#PLAN} param, or null if it is not set or blank. */
+	@Override
+	public @Nullable String resolvePlan(ChatClientRequest request) {
+		@Nullable Object value = request.context().get(SubjectParams.PLAN);
+		if (value == null || value.toString().isBlank()) {
+			return null;
+		}
+		return value.toString().strip();
+	}
 }

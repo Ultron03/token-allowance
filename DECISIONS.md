@@ -544,3 +544,88 @@ moment a user nears a budget: warn them, or tell an operator before requests sta
   change in 0.3.0).
 - Event listeners run on the chat thread; slow work needs `@Async`.
 - The event holds the subject id, so it is for alerts and audit logs, never metric tags.
+
+## 24. Minute and hour windows (2026-11-09)
+
+**Context**
+Daily and monthly budgets don't stop a script from spending a whole day's budget in one minute.
+
+**Decision**
+- `Window` gets `MINUTE` and `HOUR`. Hours follow the configured zone's local hour, so a zone with a
+  half-hour offset starts hours at :30 UTC.
+- Windows stay fixed, not sliding. A sliding window would need per-call timestamps in the ledger
+  and in the Redis scripts; fixed windows reuse the existing keys.
+- Redis keeps minute and hour keys one hour after their window ends instead of one day, and the
+  in-memory ledger evicts ended windows every minute instead of every day, so short-window counters
+  don't pile up.
+
+**Consequence**
+- Across a window boundary a subject can use up to twice the cap in a moment. Documented under
+  Limitations.
+
+## 25. Plans and replaceable limits (2026-11-09)
+
+**Context**
+Every caller got the same limits. Real apps have plans (free, pro) and customers on contracted caps
+that live in the app's database.
+
+**Decision**
+- Core port `LimitResolver` turns a `Caller` (subject ids plus an optional plan) into that caller's
+  limits. `BudgetService` asks it on admission, before each model call and when a call is charged
+  (thresholds are measured against the caller's own limits). Its result is checked for two limits
+  of one scope and window on every call.
+- The default `PlanLimits` reads `token-allowance.limits` and `token-allowance.plans.<name>`. A plan
+  only lists what differs: its limit replaces the common one with the same scope and window, the
+  rest are added. Plans can't set `GLOBAL` limits, because one shared budget can't have a cap per
+  caller. Names match ignoring case; an unknown plan gets the common limits and a WARN once.
+- The plan comes from the `SubjectParams.PLAN` advisor param, then a `PLAN_<name>` Spring Security
+  authority, never from a header (a client could claim any plan). It is read by `SubjectResolver`
+  through a new default method `resolvePlan`, so existing lambda resolvers keep compiling.
+- Spend stays keyed by subject, not plan. An upgrade only moves the cap; a fresh start is the
+  app's call, through `reset`.
+- `BudgetService.admit`, `reserve` and `settle` take a `Caller` instead of a subject map, and
+  `statusOf` takes the plan. The public ten-argument constructor takes a `LimitResolver`; the
+  released six- and eight-argument ones still take a list.
+
+**Consequence**
+- Breaking for code that calls `BudgetService` directly (0.3.0).
+- A custom resolver is called several times per request, so slow lookups need a cache.
+- The actuator endpoint resolves limits for a caller with only the one id it was asked about.
+
+## 26. Per-endpoint request caps (2026-11-09)
+
+**Context**
+`per-request.max-model-calls` applied to the whole app. A chat endpoint needs one or two model calls
+per request, an agent endpoint may need twenty.
+
+**Decision**
+- An endpoint sets `RequestLimitParams.MAX_MODEL_CALLS` and `MAX_REQUEST_COST` as advisor params,
+  usually once with `defaultAdvisors(..)` on its client. Each cap it sets replaces the configured
+  one; a cap it doesn't set comes from `per-request` (`RequestLimit.orElse`).
+- The caps don't depend on the plan. They guard against runaway loops, which depend on what the
+  endpoint does; plan budgets already limit what a caller can spend.
+- The admission advisor reads them once per request into `RequestBudgetContext`. A param that is
+  not a number greater than zero fails the request with `IllegalArgumentException`.
+
+**Consequence**
+- An endpoint can raise or lower a cap but not remove one; it sets a high number instead.
+
+## 27. Top-up and reset (2026-11-09)
+
+**Context**
+When a bug burns a user's budget, support had no way to give it back short of restarting the app
+or deleting Redis keys.
+
+**Decision**
+- `BudgetService.topUp(scope, subjectId, amount)` takes an amount off the subject's committed spend;
+  `reset(scope, subjectId)` takes off all of it. Both act on the current window of every window
+  length, so they don't depend on which limits or plan apply.
+- New ledger port method `refund(key, amount)`: committed spend goes down, never below zero, and
+  reservations stay. In Redis a small script does it, and a missing key stays missing so no key
+  without an expiry is created.
+- `reset` reads the committed spend and refunds it; a call that settles in between stays charged.
+- No actuator write operation: an endpoint that changes budgets needs more protection than one that
+  reads them. Apps expose it through their own admin API.
+
+**Consequence**
+- Custom `UsageLedger` implementations must add `refund` (breaking in 0.3.0).

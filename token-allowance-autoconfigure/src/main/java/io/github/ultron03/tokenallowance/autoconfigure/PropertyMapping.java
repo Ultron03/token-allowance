@@ -20,6 +20,7 @@ import io.github.ultron03.tokenallowance.core.LedgerFailureMode;
 import io.github.ultron03.tokenallowance.core.Limit;
 import io.github.ultron03.tokenallowance.core.ModelPrice;
 import io.github.ultron03.tokenallowance.core.Money;
+import io.github.ultron03.tokenallowance.core.PlanLimits;
 import io.github.ultron03.tokenallowance.core.RequestLimit;
 
 /**
@@ -81,6 +82,13 @@ final class PropertyMapping {
 		return limits.stream()
 			.map(limit -> new Limit(limit.scope(), limit.window(), limit.maxTokens(), moneyOrNull(limit.maxCost())))
 			.toList();
+	}
+
+	/** Returns the limits of every caller and of each plan. */
+	static PlanLimits planLimits(List<LimitProperties> limits, Map<String, List<LimitProperties>> plans) {
+		Map<String, List<Limit>> limitsByPlan = plans.entrySet().stream()
+			.collect(Collectors.toMap(Map.Entry::getKey, plan -> limits(plan.getValue())));
+		return new PlanLimits(limits(limits), limitsByPlan);
 	}
 
 	/** Returns the caps on one request; unset caps don't apply. */

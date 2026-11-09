@@ -59,6 +59,13 @@ class AdvisorParamSubjectResolverTest {
 		assertThat(this.resolver.resolve(request)).isEmpty();
 	}
 
+	@Test
+	void readsPlanFromAdvisorParam() {
+		ChatClientRequest request = requestWith(Map.of(SubjectParams.PLAN, "pro"));
+
+		assertThat(this.resolver.resolvePlan(request)).isEqualTo("pro");
+	}
+
 	private static ChatClientRequest requestWith(Map<String, Object> context) {
 		return ChatClientRequest.builder().prompt(new Prompt("hi")).context(context).build();
 	}

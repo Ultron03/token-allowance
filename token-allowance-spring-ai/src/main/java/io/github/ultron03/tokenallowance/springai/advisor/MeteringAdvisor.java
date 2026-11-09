@@ -113,7 +113,7 @@ public class MeteringAdvisor implements CallAdvisor, StreamAdvisor {
 		RequestBudgetContext context = RequestBudgetContext.from(request)
 			.orElseThrow(() -> new IllegalStateException(
 					"No request budget context: register AdmissionAdvisor on the same ChatClient"));
-		throwIfDenied(this.budgetService.checkRequest(context.modelCalls(), context.cost()));
+		throwIfDenied(this.budgetService.checkRequest(context.endpointLimit(), context.modelCalls(), context.cost()));
 
 		Prompt prompt = request.prompt();
 		String model = modelOf(prompt);
@@ -124,12 +124,12 @@ public class MeteringAdvisor implements CallAdvisor, StreamAdvisor {
 	}
 
 	private void charge(MeteredCall call, TokenUsage usage) {
-		Amount charged = this.budgetService.settle(call.reservation(), call.model(), usage);
+		Amount charged = this.budgetService.settle(call.context().caller(), call.reservation(), call.model(), usage);
 		call.context().addCost(charged.cost());
 	}
 
 	private Reservation reserve(RequestBudgetContext context, String model, TokenUsage estimate) {
-		Decision decision = this.budgetService.reserve(context.subjectIds(), model, estimate);
+		Decision decision = this.budgetService.reserve(context.caller(), model, estimate);
 		throwIfDenied(decision);
 		if (!(decision instanceof Decision.Reserved reserved)) {
 			throw new IllegalStateException("Expected a reservation but got " + decision);

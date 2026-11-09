@@ -1,5 +1,7 @@
 package io.github.ultron03.tokenallowance.core;
 
+import java.util.Objects;
+
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -24,5 +26,12 @@ public record RequestLimit(@Nullable Integer maxModelCalls, @Nullable Money maxC
 		if (maxCost != null && maxCost.equals(Money.ZERO)) {
 			throw new IllegalArgumentException("maxCost must be greater than zero");
 		}
+	}
+
+	/** {@return this limit, with each cap it doesn't set taken from {@code fallback}} */
+	public RequestLimit orElse(RequestLimit fallback) {
+		Objects.requireNonNull(fallback, "fallback can't be null");
+		return new RequestLimit((this.maxModelCalls != null) ? this.maxModelCalls : fallback.maxModelCalls(),
+				(this.maxCost != null) ? this.maxCost : fallback.maxCost());
 	}
 }

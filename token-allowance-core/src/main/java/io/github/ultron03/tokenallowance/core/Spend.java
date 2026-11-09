@@ -38,4 +38,11 @@ public record Spend(Amount committed, Amount reserved) {
 	public Spend plusCommitted(Amount amount) {
 		return new Spend(this.committed.plus(amount), this.reserved);
 	}
+
+	/** {@return this spend with {@code amount} taken off the committed part, each field at least zero} */
+	public Spend refunded(Amount amount) {
+		long tokens = Math.max(0, this.committed.tokens() - amount.tokens());
+		long micros = Math.max(0, this.committed.cost().micros() - amount.cost().micros());
+		return new Spend(new Amount(tokens, new Money(micros)), this.reserved);
+	}
 }

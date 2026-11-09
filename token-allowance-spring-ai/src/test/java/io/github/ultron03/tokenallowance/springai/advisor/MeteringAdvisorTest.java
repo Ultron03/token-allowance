@@ -149,6 +149,20 @@ class MeteringAdvisorTest {
 	}
 
 	@Test
+	void endpointCapLetsToolLoopRunPastConfiguredCap() {
+		FakeChatModel model = FakeChatModel.toolCallThenAnswer();
+		ChatClient client = client(model, service(new RequestLimit(1, null), USER_DAILY));
+
+		client.prompt("What time is it?")
+			.advisors(a -> a.param(RequestLimitParams.MAX_MODEL_CALLS, 2))
+			.tools(new TimeTool())
+			.call()
+			.content();
+
+		assertThat(model.receivedPrompts()).hasSize(2);
+	}
+
+	@Test
 	void stopsRequestWhenRequestCostReached() {
 		FakeChatModel model = FakeChatModel.toolCallThenAnswer();
 		ChatClient client = client(model, service(new RequestLimit(null, new Money(1)), USER_DAILY));
