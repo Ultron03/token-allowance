@@ -35,6 +35,7 @@ import jakarta.validation.constraints.PositiveOrZero;
  * @param limits the budgets every caller has, one per scope and window
  * @param plans per plan name, the budgets that replace or add to {@code limits} for callers on that plan
  * @param perRequest caps on one request, to cut off runaway tool loops
+ * @param estimate how much of a call is reserved before it is made
  * @param stream how interrupted streams are charged
  * @param web the HTTP response for a used-up budget
  * @param store where spend is kept and what happens while it can't be reached
@@ -47,6 +48,7 @@ public record TokenAllowanceProperties(@DefaultValue("true") boolean enabled,
 		@DefaultValue @Valid Subject subject, @DefaultValue @Valid Pricing pricing,
 		@DefaultValue List<@Valid LimitProperties> limits,
 		@DefaultValue Map<String, List<@Valid LimitProperties>> plans, @DefaultValue @Valid PerRequest perRequest,
+		@DefaultValue @Valid Estimate estimate,
 		@DefaultValue Streaming stream, @DefaultValue Web web, @DefaultValue Store store,
 		@DefaultValue({"80", "100"}) List<@Min(1) @Max(100) Integer> thresholds) {
 
@@ -131,6 +133,15 @@ public record TokenAllowanceProperties(@DefaultValue("true") boolean enabled,
 	 * @param maxCost the most dollars one request may cost, or null for no cap
 	 */
 	public record PerRequest(@Positive @Nullable Integer maxModelCalls, @Positive @Nullable BigDecimal maxCost) {
+	}
+
+	/**
+	 * What a call reserves before it is made.
+	 *
+	 * @param outputTokens the answer length to reserve, never more than the request's max tokens; unset
+	 *        reserves the request's max tokens, or 1024 without one
+	 */
+	public record Estimate(@Positive @Nullable Integer outputTokens) {
 	}
 
 	/**

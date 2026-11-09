@@ -35,9 +35,6 @@ public class MeteringAdvisor implements CallAdvisor, StreamAdvisor {
 	/** Innermost, just before the model call, so the estimate sees the final prompt. */
 	public static final int ORDER = Ordered.LOWEST_PRECEDENCE - 100;
 
-	/** Output tokens reserved when the request sets no max tokens. */
-	public static final int DEFAULT_OUTPUT_TOKENS = 1024;
-
 	/** Model name used when the request names none, so the unknown-model policy decides. */
 	public static final String UNKNOWN_MODEL = "unknown";
 
@@ -139,13 +136,9 @@ public class MeteringAdvisor implements CallAdvisor, StreamAdvisor {
 
 	private TokenUsage estimateOf(Prompt prompt) {
 		long input = this.tokenEstimator.estimateInputTokens(PromptText.of(prompt));
-		return new TokenUsage(input, outputEstimateOf(prompt), 0, 0);
-	}
-
-	private static long outputEstimateOf(Prompt prompt) {
 		@Nullable ChatOptions options = prompt.getOptions();
 		@Nullable Integer maxTokens = (options != null) ? options.getMaxTokens() : null;
-		return (maxTokens != null) ? maxTokens : DEFAULT_OUTPUT_TOKENS;
+		return new TokenUsage(input, this.tokenEstimator.estimateOutputTokens(maxTokens), 0, 0);
 	}
 
 	private static String modelOf(Prompt prompt) {

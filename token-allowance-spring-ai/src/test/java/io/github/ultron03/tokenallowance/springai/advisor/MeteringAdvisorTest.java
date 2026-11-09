@@ -136,6 +136,20 @@ class MeteringAdvisorTest {
 	}
 
 	@Test
+	void reservesTheEstimatorsOutputTokens() {
+		FakeChatModel model = answering();
+		BudgetService service = service(RequestLimit.NONE, SMALL_USER_DAILY);
+		ChatClient client = ChatClient.builder(model)
+			.defaultAdvisors(new AdmissionAdvisor(ALICE, service),
+					new MeteringAdvisor(service, new ConservativeTokenEstimator(50)))
+			.build();
+
+		client.prompt("hi").options(ToolCallingChatOptions.builder().maxTokens(5000)).call().content();
+
+		assertThat(model.receivedPrompts()).hasSize(1);
+	}
+
+	@Test
 	void cutsOffToolLoopAtMaxModelCalls() {
 		FakeChatModel model = FakeChatModel.toolCallThenAnswer();
 		ChatClient client = client(model, service(new RequestLimit(1, null), USER_DAILY));
@@ -320,7 +334,7 @@ class MeteringAdvisorTest {
 	}
 
 	private long estimateForHi() {
-		return this.estimator.estimateInputTokens("hi") + MeteringAdvisor.DEFAULT_OUTPUT_TOKENS;
+		return this.estimator.estimateInputTokens("hi") + TokenEstimator.DEFAULT_OUTPUT_TOKENS;
 	}
 
 	private BudgetService service(RequestLimit requestLimit, Limit... limits) {

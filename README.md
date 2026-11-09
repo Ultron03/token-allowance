@@ -295,6 +295,7 @@ All properties start with `token-allowance.`. Amounts are in dollars; write them
 | `plans.<name>[n].*` | none | Limits for callers on plan `<name>`, with the same fields as `limits` (see [Plans](#plans)). |
 | `per-request.max-model-calls` | none | Most model calls one request may make, tool-loop rounds included. |
 | `per-request.max-cost` | none | Most dollars one request may cost. |
+| `estimate.output-tokens` | none | Answer length a call reserves before it is made, never more than the request's max tokens. Unset reserves the request's max tokens, or 1,024 without one. Set it near your typical answer length when users are refused while they still have budget left (see below). |
 | `stream.interrupted` | `charge-estimate` | A stream that stops before the provider reports usage: `charge-estimate` charges the estimate, `release` charges nothing. |
 | `web.exception-handler` | `true` | Answers a used-up budget with 429 and an unreachable budget store with 503. Turn it off to handle `BudgetExceededException` and `LedgerUnavailableException` yourself. |
 | `store.type` | `in-memory` | `in-memory` keeps spend in each instance; `redis` shares it across instances (see below). |
@@ -440,7 +441,7 @@ Every bean steps aside when your app defines one of the same type:
 
 | Bean | Replace it to |
 |---|---|
-| `TokenEstimator` | Count tokens exactly with your model's tokenizer. |
+| `TokenEstimator` | Count input tokens exactly with your model's tokenizer, or reserve output your own way (`estimateOutputTokens`). |
 | `PriceCatalog` | Load prices from somewhere other than properties. |
 | `LimitResolver` | Read limits from your own store, such as a customer's contract (see [Plans](#plans)). |
 | `UsageLedger` | Store spend somewhere other than memory or Redis. Throw `LedgerUnavailableException` when your store can't be reached, so the failure mode applies. `commit` returns each budget's committed spend after the charge, read in the same atomic step, so budget alerts fire exactly once. `refund` backs `topUp` and `reset`. |
@@ -465,6 +466,7 @@ ChatClient chatClient = ChatClient.builder(chatModel)
 - **In-memory spend is per instance.** With the default `store.type`, spend is lost on restart and each instance of your app has its own budgets. Use Redis to share them.
 - **A crashed instance leaves its estimates reserved.** If an instance stops between reserving and settling a call, that estimate stays counted in Redis until the budget's window ends.
 - **The pre-call token estimate is approximate.** The default estimator assumes one token per three characters, rounded up. For English and most code this is higher than the real count, which is the safe direction. For Chinese, Japanese and Korean text it can be about three times too low. Tool schemas and images are not counted. The output estimate is the request's max tokens, or 1,024 if none is set. After the call, the provider's token count replaces the estimate; the estimate is charged only when the provider reports no usage.
+- **A user can be refused with budget left.** Before each call the whole estimate must fit in what is left, so with a 1,000-token answer reserved, a user with 800 tokens left is refused even if their answer would have used 100. `estimate.output-tokens` reserves a typical answer instead; a longer answer is still charged in full, so the budget can then go over by the difference.
 - **A denied stream logs an ERROR line.** When a budget denies a streamed call, Spring AI's `MessageAggregator` logs `Aggregation Error` with the `BudgetExceededException`, even when your app handles the exception. The log line comes from Spring AI and can be ignored.
 - **A stream can be subscribed only once.** Spring AI runs its advisor chain once per `stream()` call. Subscribing twice to the same result fails instead of making a second call; call `stream()` again for a new request.
 - **A streamed response that has started can't become a 429.** If a budget runs out during a tool loop after the first chunk was sent, the HTTP status is already fixed, so the error ends the stream instead.

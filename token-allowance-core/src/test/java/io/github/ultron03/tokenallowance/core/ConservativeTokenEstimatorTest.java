@@ -48,4 +48,34 @@ class ConservativeTokenEstimatorTest {
 	void rejectsNullText() {
 		assertThatThrownBy(() -> ESTIMATOR.estimateInputTokens(null)).isInstanceOf(NullPointerException.class);
 	}
+
+	@Test
+	void reservesMaxTokensForOutputByDefault() {
+		assertThat(ESTIMATOR.estimateOutputTokens(200)).isEqualTo(200);
+	}
+
+	@Test
+	void reservesDefaultOutputTokensWithoutMaxTokens() {
+		assertThat(ESTIMATOR.estimateOutputTokens(null)).isEqualTo(TokenEstimator.DEFAULT_OUTPUT_TOKENS);
+	}
+
+	@Test
+	void reservesExpectedOutputWhenBelowMaxTokens() {
+		assertThat(new ConservativeTokenEstimator(60).estimateOutputTokens(200)).isEqualTo(60);
+	}
+
+	@Test
+	void neverReservesMoreOutputThanMaxTokens() {
+		assertThat(new ConservativeTokenEstimator(60).estimateOutputTokens(40)).isEqualTo(40);
+	}
+
+	@Test
+	void reservesExpectedOutputWithoutMaxTokens() {
+		assertThat(new ConservativeTokenEstimator(60).estimateOutputTokens(null)).isEqualTo(60);
+	}
+
+	@Test
+	void rejectsExpectedOutputOfZero() {
+		assertThatThrownBy(() -> new ConservativeTokenEstimator(0)).isInstanceOf(IllegalArgumentException.class);
+	}
 }

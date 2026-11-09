@@ -651,3 +651,23 @@ session budgets.
 **Consequence**
 - Token-only setups need no pricing configuration.
 - Costs of unpriced models show as zero in metrics and events.
+
+## 29. Configurable output estimate (2026-11-10)
+
+**Context**
+A call reserves its whole output estimate before it runs: the request's max tokens, or 1,024. The
+demo recording showed the effect: a user with $0.000465 of a $0.0006 budget left was refused,
+because one reserved answer cost $0.0005, while real answers cost $0.00004.
+
+**Decision**
+- `TokenEstimator` gets `estimateOutputTokens(maxTokens)`, a default method with the old rule, so
+  custom estimators keep compiling. The constant moves from `MeteringAdvisor.DEFAULT_OUTPUT_TOKENS`
+  to `TokenEstimator.DEFAULT_OUTPUT_TOKENS`.
+- `ConservativeTokenEstimator(expectedOutputTokens)` reserves a typical answer instead, never more
+  than the request's max tokens. Property `token-allowance.estimate.output-tokens`; unset keeps the
+  old behaviour.
+- The estimate is a reservation only: the reported usage is still charged in full afterwards.
+
+**Consequence**
+- With the setting, a budget can go over by the difference between real and expected answer
+  length for each call in flight. Documented under Limitations.

@@ -95,7 +95,7 @@ public class ConfiguredPriceCatalog implements PriceCatalog {
 
 	private void warnOnce(String name) {
 		if (this.warnedModels.add(name)) {
-			log.warn("No price for model '{}', applying unknown-model policy {}. "
+			log.warn("No price for model '{}' (unknown-model policy {}). "
 					+ "Add a price for this model to the pricing configuration.", name, this.unknownModelPolicy);
 		}
 	}

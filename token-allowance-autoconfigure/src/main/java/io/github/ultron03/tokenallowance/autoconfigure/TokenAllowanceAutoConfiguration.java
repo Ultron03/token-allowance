@@ -81,11 +81,12 @@ public class TokenAllowanceAutoConfiguration {
 		return Clock.systemUTC();
 	}
 
-	/** Estimates prompt tokens before a call. */
+	/** Estimates the tokens of a call before it is made, reserving {@code estimate.output-tokens} if set. */
 	@Bean
 	@ConditionalOnMissingBean
-	TokenEstimator tokenEstimator() {
-		return new ConservativeTokenEstimator();
+	TokenEstimator tokenEstimator(TokenAllowanceProperties properties) {
+		@Nullable Integer outputTokens = properties.estimate().outputTokens();
+		return (outputTokens != null) ? new ConservativeTokenEstimator(outputTokens) : new ConservativeTokenEstimator();
 	}
 
 	/** Prices from {@code token-allowance.pricing}. */

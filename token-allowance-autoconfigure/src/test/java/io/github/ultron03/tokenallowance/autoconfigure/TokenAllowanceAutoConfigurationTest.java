@@ -170,6 +170,24 @@ class TokenAllowanceAutoConfigurationTest {
 	}
 
 	@Test
+	void reservesConfiguredOutputEstimate() {
+		runner.withPropertyValues("token-allowance.estimate.output-tokens=50")
+			.run(context -> assertThat(context.getBean(TokenEstimator.class).estimateOutputTokens(5000)).isEqualTo(50));
+	}
+
+	@Test
+	void reservesMaxTokensForOutputByDefault() {
+		runner.run(context -> assertThat(context.getBean(TokenEstimator.class).estimateOutputTokens(5000))
+			.isEqualTo(5000));
+	}
+
+	@Test
+	void failsStartupForOutputEstimateOfZero() {
+		runner.withPropertyValues("token-allowance.estimate.output-tokens=0")
+			.run(context -> assertThat(context).hasFailed());
+	}
+
+	@Test
 	void tokenOnlyLimitsWorkWithoutPrices() {
 		runner.withPropertyValues(USER_DAILY_LIMIT).run(context -> {
 			BudgetService service = context.getBean(BudgetService.class);
