@@ -192,6 +192,7 @@ All properties start with `token-allowance.`. Amounts are in dollars; write them
 | `web.exception-handler` | `true` | Answers a used-up budget with 429 and an unreachable budget store with 503. Turn it off to handle `BudgetExceededException` and `LedgerUnavailableException` yourself. |
 | `store.type` | `in-memory` | `in-memory` keeps spend in each instance; `redis` shares it across instances (see below). |
 | `store.failure-mode` | `auto` | What happens to new calls while Redis can't be reached: `fail-open`, `fail-closed`, or `auto` (open in `observe` mode, closed in `enforce` mode). |
+| `thresholds` | `80,100` | Percents of each limit at which a `BudgetThresholdReached` event is published, each from 1 to 100 (see [Alerts](#alerts)). |
 
 The app fails at startup on an invalid setting, such as a price with more than six decimal places. That is almost always a per-token price where a per-million price was meant.
 
@@ -230,6 +231,101 @@ Set `spring.data.redis.timeout`. Without it, every call waits up to 60 seconds f
 
 With Spring Boot Actuator, Boot's own `redis` health indicator turns `/actuator/health` DOWN while Redis is unreachable, also in `fail-open` mode, where the app still serves calls. The Kubernetes liveness and readiness groups don't include it by default; leave it out of them if you fail open.
 
+## Metrics
+
+With Spring Boot Actuator, or any other `MeterRegistry` bean, Token Allowance records these meters:
+
+| Meter | Type | Tags | What it counts |
+|---|---|---|---|
+| `token.allowance.decisions` | counter | `stage` (`admission`, `request`, `reservation`), `outcome` (`allowed`, `denied`, `observed`, `ledger-unavailable`), `scope` (`user`, `tenant`, `session`, `global`, `none`) | Every admission and reservation, and every time a per-request cap is reached. `observed` means over budget but let through in `observe` mode. `scope` is the budget that ran out. |
+| `token.allowance.cost` | counter, USD | `model`, `charge` (`usage`, `estimate`) | Cost charged to budgets. `estimate` means the provider reported no usage. |
+| `token.allowance.tokens` | counter | `model`, `charge` | Tokens charged to budgets. |
+| `token.allowance.estimate.ratio` | distribution summary | `model` | Reported tokens divided by the estimate reserved before the call. Above 1 means the estimate was too low. |
+
+No meter is tagged with a user, tenant or session id. Turn them all off with `management.metrics.enable.token.allowance=false`.
+
+Spring AI already records the tokens each model call used (`gen_ai.client.token.usage`). `token.allowance.tokens` differs in that it counts what was charged, including estimates for calls without reported usage.
+
+To record the same events somewhere else, define a `BudgetListener` bean; it is called after every decision and every charged or released call. For charged and released calls, listening for the `CallSettled` application event is simpler (see [Budget events](#budget-events)).
+
+## Actuator endpoint
+
+With Spring Boot Actuator, the `tokenallowance` endpoint shows where a subject stands in the current windows. Like most endpoints, it is not exposed until you include it:
+
+```yaml
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,tokenallowance
+```
+
+`GET /actuator/tokenallowance/{scope}/{subjectId}`, for example `/actuator/tokenallowance/user/alice`:
+
+```json
+{
+  "scope": "user",
+  "subjectId": "alice",
+  "budgets": [
+    {
+      "window": "daily",
+      "windowStart": "2026-11-08T00:00:00Z",
+      "resetsAt": "2026-11-09T00:00:00Z",
+      "maxTokens": 100000,
+      "maxCost": 1.000000,
+      "committed": { "tokens": 4200, "cost": 0.012600 },
+      "reserved": { "tokens": 1500, "cost": 0.002000 }
+    }
+  ]
+}
+```
+
+There is one entry per limit configured for the scope. `committed` is what finished calls used; `reserved` is what calls still running hold. Costs are in US dollars. For the global budget, use any subject id, for example `/actuator/tokenallowance/global/all`. A scope without limits answers `404`.
+
+The endpoint shows any user's spend to whoever can reach it, so secure it like your other actuator endpoints.
+
+## Budget events
+
+Token Allowance publishes two application events. Both hold subject ids, so don't use them as metric tags.
+
+### Alerts
+
+When a call takes a subject's committed spend to 80% or 100% of a limit (see `thresholds`), Token Allowance publishes a `BudgetThresholdReached` application event:
+
+```java
+@Component
+class BudgetAlerts {
+
+	@Async
+	@EventListener
+	void onThresholdReached(BudgetThresholdReached event) {
+		if (event.percent() == 100) {
+			// event.key().subjectId() has used up event.limit() until event.resetsAt()
+		}
+	}
+}
+```
+
+Each threshold fires once per subject and window, from the call that crossed it, even with several instances sharing Redis. A call that jumps past several thresholds publishes one event for each, lowest first. Only charged calls count, not calls still in flight. Events are also published in `observe` mode, so `100` shows who would have been denied. While the budget store can't be reached, nothing is recorded and no event is published.
+
+### Audit log
+
+Every model call publishes a `CallSettled` event once it is charged or released:
+
+```java
+@Async
+@EventListener
+void onCallSettled(CallSettled call) {
+	auditLog.save(call.model(), call.keys(), call.estimate(), call.reported(), call.charged(), call.outcome());
+}
+```
+
+`keys` are the budgets the call counted against, with their subject ids. `estimate` is what was reserved before the call, `reported` is the usage the provider reported, and `charged` is what the budgets were charged. `outcome` is `CHARGED` (the reported usage), `ESTIMATE_CHARGED` (the provider reported no usage) or `RELEASED` (the call failed, nothing charged). The event never holds prompt or response text. It is published even while the budget store can't be reached; the charge itself is then lost.
+
+### Listener threads
+
+Event listeners run on the thread of the chat call, after it has been charged. Use `@Async` (with `@EnableAsync`) for anything slow, such as sending an email or writing to a database; `CallSettled` fires on every model call, so this matters most there. An exception from a listener is logged and does not fail the chat call.
+
 ## Replacing parts
 
 Every bean steps aside when your app defines one of the same type:
@@ -238,7 +334,7 @@ Every bean steps aside when your app defines one of the same type:
 |---|---|
 | `TokenEstimator` | Count tokens exactly with your model's tokenizer. |
 | `PriceCatalog` | Load prices from somewhere other than properties. |
-| `UsageLedger` | Store spend somewhere other than memory or Redis. Throw `LedgerUnavailableException` when your store can't be reached, so the failure mode applies. |
+| `UsageLedger` | Store spend somewhere other than memory or Redis. Throw `LedgerUnavailableException` when your store can't be reached, so the failure mode applies. `commit` returns each budget's committed spend after the charge, read in the same atomic step, so budget alerts fire exactly once. |
 | `SubjectResolver` | Find the user, tenant or session your own way. |
 | `Clock` | Control time in tests. |
 

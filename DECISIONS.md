@@ -458,3 +458,89 @@ count.
   applies. The README tells users to set it.
 - `store.type: redis` without the Redis module fails at startup because no `UsageLedger` bean
   exists.
+
+## 21. Metrics through a listener port (2026-11-08)
+
+**Context**
+Observe mode is only useful if users can see what would have been denied and how far the estimate
+is off. Core must stay free of Micrometer, and the planned audit event needs the same facts as the
+meters.
+
+**Decision**
+- Core gets a plain-Java `BudgetListener` with two events: `DecisionMade` (stage, outcome, scope of
+  the budget that ran out) and `CallSettled` (model, keys, estimate, reported usage, charge,
+  outcome). `BudgetService` calls every listener; Micrometer is one adapter, in the spring-ai
+  module.
+- Decisions carry a `stage` tag. Without it, an allowed admission and an allowed reservation would
+  land in one count. Per-request caps report only when reached, so a model call is not counted
+  twice.
+- Observe mode reports `observed`, not `allowed`, so the meters show what enforce mode would deny.
+- `release` takes the model, so a released call is reported like a charged one.
+- Listeners run on the caller's thread after the ledger work, and their exceptions are not caught.
+  A failing listener fails the request but can't leave a reservation open.
+- Tags are limited to model, stage, outcome, scope and charge. Subject ids stay in `CallSettled`
+  for audit listeners and never reach a tag.
+- The estimate ratio is recorded only when the provider reported usage; for an estimate charge it
+  would always be 1.
+
+**Consequence**
+- Any `BudgetListener` bean is called, so users can keep their own audit log without new API.
+- An interrupted stream charged its estimate counts as `usage` with ratio 1, pulling the ratio
+  slightly toward 1.
+- `token.allowance.tokens` overlaps Spring AI's `gen_ai.client.token.usage`; it differs by counting
+  charged estimates.
+
+## 22. Actuator endpoint for current spend (2026-11-08)
+
+**Context**
+Operators need to answer "why was alice denied, and when can she call again?" without reading
+Redis by hand.
+
+**Decision**
+- `GET /actuator/tokenallowance/{scope}/{subjectId}` returns one entry per limit of the scope:
+  window, window start, reset time, caps, and committed and reserved spend.
+- Which keys apply and when a window resets stays in core (`BudgetService.statusOf`); the endpoint
+  only formats the result.
+- Costs are dollar numbers with six decimals (`Money.toDollars()`), not micro-dollars, so they read
+  like the configured prices.
+- For the global scope the subject id is ignored, because there is one global budget.
+- A scope without limits answers 404. A ledger outage is not handled by the failure mode: the read
+  fails with 500, and Boot's `redis` health indicator already reports the outage.
+- No list of all subjects: in Redis it would need a key scan.
+- The endpoint is only registered when the app exposes it, like Boot's own endpoints.
+
+**Consequence**
+- Anyone who can reach the endpoint can read any subject's spend; apps secure it like other actuator
+  endpoints.
+
+## 23. Budget threshold and settled-call events (2026-11-08)
+
+**Context**
+Meters show totals and the actuator endpoint answers only when asked. Apps also want to act the
+moment a user nears a budget: warn them, or tell an operator before requests start failing.
+
+**Decision**
+- `BudgetService` checks, after each charge, whether the call moved a budget's committed spend from
+  below a threshold to at or above it, and tells `BudgetListener.onThresholdReached`. Reserved
+  estimates don't count, as in admission.
+- Thresholds are percents from 1 to 100, `80,100` by default, applied to every limit. A threshold
+  is reached when either cap is at it, compared in whole numbers (`used * 100 >= cap * percent`).
+  A call passing several thresholds reports each, lowest first.
+- `UsageLedger.commit` returns each key's committed spend after the charge, read atomically with
+  it (under the lock in memory, from `HINCRBY` in the Redis script). Commits on one key are
+  serialised, so exactly one call crosses each threshold, across instances, with no "already sent"
+  state; a new window is a new key and starts over. Reading `current()` after `commit` was
+  rejected: two concurrent commits on the global budget could both report the crossing, or
+  neither.
+- The core record `BudgetThresholdReached` is published as the application event as it is, with
+  no Spring copy of it. `ApplicationEventBudgetListener` catches exceptions from event listeners
+  and logs them, because the call has already been charged.
+- Events also fire in observe mode. During a ledger outage the charge is lost, so no event fires.
+- `CallSettled` (from 5.1) is published the same way, once per charged or released model call,
+  so apps can keep their own audit log. It is published even during a ledger outage.
+
+**Consequence**
+- Custom `UsageLedger` implementations must return the committed totals from `commit` (breaking
+  change in 0.3.0).
+- Event listeners run on the chat thread; slow work needs `@Async`.
+- The event holds the subject id, so it is for alerts and audit logs, never metric tags.

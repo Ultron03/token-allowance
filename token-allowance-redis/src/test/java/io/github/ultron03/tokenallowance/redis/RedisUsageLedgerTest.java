@@ -65,6 +65,25 @@ class RedisUsageLedgerTest extends RedisTestSupport {
 	}
 
 	@Test
+	void commitReturnsCommittedSpendOfEveryKey() {
+		this.ledger.commit(this.ledger.reserveUnchecked(Set.of(this.alice), ESTIMATE), ACTUAL);
+		Reservation reservation = this.ledger.reserveUnchecked(Set.of(this.alice, this.global), ESTIMATE);
+
+		Map<BudgetKey, Amount> committed = this.ledger.commit(reservation, ACTUAL);
+
+		assertThat(committed).containsOnly(Map.entry(this.alice, new Amount(600, new Money(300))),
+				Map.entry(this.global, ACTUAL));
+	}
+
+	@Test
+	void commitOfSettledReservationReturnsNothing() {
+		Reservation reservation = this.ledger.reserveUnchecked(Set.of(this.alice), ESTIMATE);
+		this.ledger.commit(reservation, ACTUAL);
+
+		assertThat(this.ledger.commit(reservation, ACTUAL)).isEmpty();
+	}
+
+	@Test
 	void releaseRemovesEstimateWithoutCharging() {
 		Reservation reservation = this.ledger.reserveUnchecked(Set.of(this.alice), ESTIMATE);
 

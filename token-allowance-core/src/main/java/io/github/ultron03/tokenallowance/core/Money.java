@@ -59,9 +59,14 @@ public record Money(long micros) {
 		return this.micros > other.micros;
 	}
 
+	/** {@return the amount in dollars, always with six decimal places} */
+	public BigDecimal toDollars() {
+		return BigDecimal.valueOf(this.micros, MICROS_SCALE);
+	}
+
 	/** {@return the amount in dollars, for example {@code $1.500000}} */
 	@Override
 	public String toString() {
-		return "$" + BigDecimal.valueOf(micros, MICROS_SCALE).toPlainString();
+		return "$" + toDollars().toPlainString();
 	}
 }

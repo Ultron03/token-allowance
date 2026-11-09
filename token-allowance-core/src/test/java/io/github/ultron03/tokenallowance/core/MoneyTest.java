@@ -3,6 +3,8 @@ package io.github.ultron03.tokenallowance.core;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.math.BigDecimal;
+
 import org.junit.jupiter.api.Test;
 
 class MoneyTest {
@@ -70,5 +72,10 @@ class MoneyTest {
 	@Test
 	void nonNumericInputThrowsNumberFormatException() {
 		assertThatThrownBy(() -> Money.ofDollars("abc")).isInstanceOf(NumberFormatException.class);
+	}
+
+	@Test
+	void toDollarsKeepsSixDecimalPlaces() {
+		assertThat(new Money(1_500_000).toDollars()).isEqualTo(new BigDecimal("1.500000"));
 	}
 }

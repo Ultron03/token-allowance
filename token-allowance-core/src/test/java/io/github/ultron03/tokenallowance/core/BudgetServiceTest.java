@@ -51,6 +51,8 @@ class BudgetServiceTest {
 
 	private final InMemoryUsageLedger ledger = new InMemoryUsageLedger(this.clock, ZoneOffset.UTC);
 
+	private final RecordingListener listener = new RecordingListener();
+
 	@Test
 	void admitsWhenNothingIsSpent() {
 		BudgetService service = service(EnforcementMode.ENFORCE, USER_DAILY);
@@ -187,7 +189,7 @@ class BudgetServiceTest {
 		BudgetService service = service(EnforcementMode.ENFORCE, USER_DAILY);
 		Reservation reservation = reservationOf(service.reserve(ALICE, MODEL, ESTIMATE));
 
-		service.release(reservation);
+		service.release(reservation, MODEL);
 
 		assertThat(this.ledger.current(ALICE_TODAY)).isEqualTo(Spend.ZERO);
 	}
@@ -475,7 +477,275 @@ class BudgetServiceTest {
 		BudgetService service = unavailable(LedgerFailureMode.FAIL_CLOSED);
 		Reservation reservation = new Reservation("r1", Set.of(ALICE_TODAY), ESTIMATE_AMOUNT);
 
-		assertThatCode(() -> service.release(reservation)).doesNotThrowAnyException();
+		assertThatCode(() -> service.release(reservation, MODEL)).doesNotThrowAnyException();
+	}
+
+	@Test
+	void notifiesAllowedAdmission() {
+		BudgetService service = listened(EnforcementMode.ENFORCE, this.ledger, LedgerFailureMode.FAIL_CLOSED);
+
+		service.admit(ALICE);
+
+		assertThat(this.listener.decisions).containsExactly(
+				new DecisionMade(DecisionMade.Stage.ADMISSION, DecisionMade.Outcome.ALLOWED, null));
+	}
+
+	@Test
+	void notifiesDeniedAdmissionWithScopeOfUsedUpBudget() {
+		BudgetService service = listened(EnforcementMode.ENFORCE, this.ledger, LedgerFailureMode.FAIL_CLOSED);
+		service.settle(reservationOf(service.reserve(ALICE, MODEL, ESTIMATE)), MODEL, new TokenUsage(1500, 500, 0, 0));
+
+		service.admit(ALICE);
+
+		assertThat(this.listener.decisions).last()
+			.isEqualTo(new DecisionMade(DecisionMade.Stage.ADMISSION, DecisionMade.Outcome.DENIED, Scope.USER));
+	}
+
+	@Test
+	void notifiesObservedAdmissionInObserveMode() {
+		BudgetService service = listened(EnforcementMode.OBSERVE, this.ledger, LedgerFailureMode.FAIL_OPEN);
+		service.settle(reservationOf(service.reserve(ALICE, MODEL, ESTIMATE)), MODEL, new TokenUsage(1500, 500, 0, 0));
+
+		service.admit(ALICE);
+
+		assertThat(this.listener.decisions).last()
+			.isEqualTo(new DecisionMade(DecisionMade.Stage.ADMISSION, DecisionMade.Outcome.OBSERVED, Scope.USER));
+	}
+
+	@Test
+	void notifiesUnavailableLedgerBeforeFailingClosed() {
+		BudgetService service = listened(EnforcementMode.ENFORCE, new UnavailableLedger(),
+				LedgerFailureMode.FAIL_CLOSED);
+
+		assertThatThrownBy(() -> service.admit(ALICE)).isInstanceOf(LedgerUnavailableException.class);
+
+		assertThat(this.listener.decisions).containsExactly(
+				new DecisionMade(DecisionMade.Stage.ADMISSION, DecisionMade.Outcome.LEDGER_UNAVAILABLE, null));
+	}
+
+	@Test
+	void notifiesRequestCapOnlyWhenReached() {
+		BudgetService service = new BudgetService(this.ledger, rejectingCatalog(), List.of(USER_DAILY),
+				new RequestLimit(3, null), EnforcementMode.ENFORCE, LedgerFailureMode.FAIL_CLOSED, this.clock,
+				ZoneOffset.UTC, List.of(), List.of(this.listener));
+
+		service.checkRequest(2, Money.ZERO);
+		service.checkRequest(3, Money.ZERO);
+
+		assertThat(this.listener.decisions).containsExactly(
+				new DecisionMade(DecisionMade.Stage.REQUEST, DecisionMade.Outcome.DENIED, null));
+	}
+
+	@Test
+	void notifiesAllowedThenDeniedReservation() {
+		BudgetService service = listened(EnforcementMode.ENFORCE, this.ledger, LedgerFailureMode.FAIL_CLOSED);
+
+		service.reserve(ALICE, MODEL, ESTIMATE);
+		service.reserve(ALICE, MODEL, ESTIMATE);
+
+		assertThat(this.listener.decisions).containsExactly(
+				new DecisionMade(DecisionMade.Stage.RESERVATION, DecisionMade.Outcome.ALLOWED, null),
+				new DecisionMade(DecisionMade.Stage.RESERVATION, DecisionMade.Outcome.DENIED, Scope.USER));
+	}
+
+	@Test
+	void notifiesObservedReservationInObserveMode() {
+		BudgetService service = listened(EnforcementMode.OBSERVE, this.ledger, LedgerFailureMode.FAIL_OPEN);
+
+		service.reserve(ALICE, MODEL, ESTIMATE);
+		service.reserve(ALICE, MODEL, ESTIMATE);
+
+		assertThat(this.listener.decisions).last()
+			.isEqualTo(new DecisionMade(DecisionMade.Stage.RESERVATION, DecisionMade.Outcome.OBSERVED, Scope.USER));
+	}
+
+	@Test
+	void notifiesChargedCallWithReportedUsage() {
+		BudgetService service = listened(EnforcementMode.ENFORCE, this.ledger, LedgerFailureMode.FAIL_CLOSED);
+		Reservation reservation = reservationOf(service.reserve(ALICE, MODEL, ESTIMATE));
+		TokenUsage reported = new TokenUsage(800, 200, 0, 0);
+
+		Amount charged = service.settle(reservation, MODEL, reported);
+
+		assertThat(this.listener.settled).containsExactly(new CallSettled(MODEL, Set.of(ALICE_TODAY),
+				ESTIMATE_AMOUNT, reported, charged, CallSettled.Outcome.CHARGED));
+	}
+
+	@Test
+	void notifiesEstimateChargedWhenUsageIsMissing() {
+		BudgetService service = listened(EnforcementMode.ENFORCE, this.ledger, LedgerFailureMode.FAIL_CLOSED);
+		Reservation reservation = reservationOf(service.reserve(ALICE, MODEL, ESTIMATE));
+
+		service.settle(reservation, MODEL, TokenUsage.ZERO);
+
+		assertThat(this.listener.settled).containsExactly(new CallSettled(MODEL, Set.of(ALICE_TODAY),
+				ESTIMATE_AMOUNT, TokenUsage.ZERO, ESTIMATE_AMOUNT, CallSettled.Outcome.ESTIMATE_CHARGED));
+	}
+
+	@Test
+	void notifiesReleasedCallWithoutCharge() {
+		BudgetService service = listened(EnforcementMode.ENFORCE, this.ledger, LedgerFailureMode.FAIL_CLOSED);
+		Reservation reservation = reservationOf(service.reserve(ALICE, MODEL, ESTIMATE));
+
+		service.release(reservation, MODEL);
+
+		assertThat(this.listener.settled).containsExactly(new CallSettled(MODEL, Set.of(ALICE_TODAY),
+				ESTIMATE_AMOUNT, TokenUsage.ZERO, Amount.ZERO, CallSettled.Outcome.RELEASED));
+	}
+
+	@Test
+	void notifiesSettledCallEvenWhenLedgerUnavailable() {
+		BudgetService service = listened(EnforcementMode.ENFORCE, new UnavailableLedger(),
+				LedgerFailureMode.FAIL_CLOSED);
+		Reservation reservation = new Reservation("r1", Set.of(ALICE_TODAY), ESTIMATE_AMOUNT);
+
+		service.settle(reservation, MODEL, new TokenUsage(800, 200, 0, 0));
+
+		assertThat(this.listener.settled).singleElement()
+			.extracting(CallSettled::outcome)
+			.isEqualTo(CallSettled.Outcome.CHARGED);
+	}
+
+	@Test
+	void notifiesWhenCallTakesSpendToThreshold() {
+		BudgetService service = alerting(List.of(80), EnforcementMode.ENFORCE, this.ledger);
+		Reservation reservation = reservationOf(service.reserve(ALICE, MODEL, ESTIMATE));
+
+		// 1,600 of 2,000 tokens is 80%; 1,100 input at $1/MTok plus 500 output at $2/MTok is $0.0021.
+		service.settle(reservation, MODEL, new TokenUsage(1100, 500, 0, 0));
+
+		assertThat(this.listener.thresholds).containsExactly(new BudgetThresholdReached(ALICE_TODAY, USER_DAILY, 80,
+				new Amount(1600, Money.ofDollars("0.0021")), Instant.parse("2026-10-23T00:00:00Z")));
+	}
+
+	@Test
+	void notifiesOnlyTheCallThatCrossesThreshold() {
+		BudgetService service = alerting(List.of(80), EnforcementMode.ENFORCE, this.ledger);
+
+		charge(service, 1000);
+		charge(service, 600);
+		charge(service, 200);
+
+		assertThat(this.listener.thresholds).singleElement()
+			.extracting(reached -> reached.committed().tokens())
+			.isEqualTo(1600L);
+	}
+
+	@Test
+	void notifiesAgainInNextWindow() {
+		BudgetService service = alerting(List.of(80), EnforcementMode.ENFORCE, this.ledger);
+
+		charge(service, 1600);
+		this.clock.advance(Duration.ofDays(1));
+		charge(service, 1600);
+
+		assertThat(this.listener.thresholds).extracting(reached -> reached.key().windowStart())
+			.containsExactly(Instant.parse("2026-10-22T00:00:00Z"), Instant.parse("2026-10-23T00:00:00Z"));
+	}
+
+	@Test
+	void notifiesEveryThresholdOneCallPassesInAscendingOrder() {
+		BudgetService service = alerting(List.of(100, 80), EnforcementMode.ENFORCE, this.ledger);
+
+		charge(service, 2000);
+
+		assertThat(this.listener.thresholds).extracting(BudgetThresholdReached::percent).containsExactly(80, 100);
+	}
+
+	@Test
+	void notifiesThresholdsPassedInObserveMode() {
+		BudgetService service = alerting(List.of(80, 100), EnforcementMode.OBSERVE, this.ledger);
+
+		charge(service, 1500);
+		charge(service, 1500);
+
+		assertThat(this.listener.thresholds).extracting(BudgetThresholdReached::percent).containsExactly(80, 100);
+	}
+
+	@Test
+	void noThresholdEventWhenLedgerUnavailable() {
+		BudgetService service = alerting(List.of(80), EnforcementMode.ENFORCE, new UnavailableLedger());
+		Reservation reservation = new Reservation("r1", Set.of(ALICE_TODAY), ESTIMATE_AMOUNT);
+
+		service.settle(reservation, MODEL, new TokenUsage(1600, 0, 0, 0));
+
+		assertThat(this.listener.thresholds).isEmpty();
+	}
+
+	@Test
+	void noThresholdEventWhenSettledTwice() {
+		BudgetService service = alerting(List.of(80), EnforcementMode.ENFORCE, this.ledger);
+		Reservation reservation = reservationOf(service.reserve(ALICE, MODEL, ESTIMATE));
+
+		service.settle(reservation, MODEL, new TokenUsage(1600, 0, 0, 0));
+		service.settle(reservation, MODEL, new TokenUsage(1600, 0, 0, 0));
+
+		assertThat(this.listener.thresholds).hasSize(1);
+	}
+
+	@Test
+	void rejectsThresholdAbove100() {
+		assertThatThrownBy(() -> alerting(List.of(101), EnforcementMode.ENFORCE, this.ledger))
+			.isInstanceOf(IllegalArgumentException.class)
+			.hasMessageContaining("101");
+	}
+
+	@Test
+	void statusShowsCommittedAndReservedSpendWithResetTime() {
+		BudgetService service = service(EnforcementMode.ENFORCE, USER_DAILY);
+		service.settle(reservationOf(service.reserve(ALICE, MODEL, ESTIMATE)), MODEL, new TokenUsage(800, 200, 0, 0));
+		service.reserve(ALICE, MODEL, new TokenUsage(500, 250, 0, 0));
+
+		List<BudgetStatus> status = service.statusOf(Scope.USER, "alice");
+
+		assertThat(status).containsExactly(new BudgetStatus(USER_DAILY, Instant.parse("2026-10-22T00:00:00Z"),
+				Instant.parse("2026-10-23T00:00:00Z"),
+				new Spend(new Amount(1000, new Money(1200)), new Amount(750, new Money(1000)))));
+	}
+
+	@Test
+	void statusListsEveryWindowOfTheScope() {
+		Limit userMonthly = new Limit(Scope.USER, Window.MONTHLY, null, Money.ofDollars("5.00"));
+		BudgetService service = service(EnforcementMode.ENFORCE, USER_DAILY, userMonthly, GLOBAL_MONTHLY);
+
+		List<BudgetStatus> status = service.statusOf(Scope.USER, "alice");
+
+		assertThat(status).extracting(BudgetStatus::limit).containsExactly(USER_DAILY, userMonthly);
+	}
+
+	@Test
+	void statusIsEmptyForScopeWithoutLimits() {
+		BudgetService service = service(EnforcementMode.ENFORCE, USER_DAILY);
+
+		assertThat(service.statusOf(Scope.TENANT, "acme")).isEmpty();
+	}
+
+	@Test
+	void globalStatusIgnoresSubjectId() {
+		BudgetService service = service(EnforcementMode.ENFORCE, GLOBAL_MONTHLY);
+		service.reserve(ALICE, MODEL, ESTIMATE);
+
+		List<BudgetStatus> status = service.statusOf(Scope.GLOBAL, "anyone");
+
+		assertThat(status).singleElement()
+			.extracting(budget -> budget.spend().reserved())
+			.isEqualTo(ESTIMATE_AMOUNT);
+	}
+
+	private BudgetService listened(EnforcementMode mode, UsageLedger usageLedger, LedgerFailureMode failureMode) {
+		return new BudgetService(usageLedger, rejectingCatalog(), List.of(USER_DAILY), RequestLimit.NONE, mode,
+				failureMode, this.clock, ZoneOffset.UTC, List.of(), List.of(this.listener));
+	}
+
+	private BudgetService alerting(List<Integer> thresholds, EnforcementMode mode, UsageLedger usageLedger) {
+		return new BudgetService(usageLedger, rejectingCatalog(), List.of(USER_DAILY), RequestLimit.NONE, mode,
+				LedgerFailureMode.FAIL_OPEN, this.clock, ZoneOffset.UTC, thresholds, List.of(this.listener));
+	}
+
+	/** Reserves and charges a call of {@code inputTokens} input tokens for alice. */
+	private static void charge(BudgetService service, long inputTokens) {
+		TokenUsage usage = new TokenUsage(inputTokens, 0, 0, 0);
+		service.settle(reservationOf(service.reserve(ALICE, MODEL, usage)), MODEL, usage);
 	}
 
 	private BudgetService requestCapped(EnforcementMode mode) {
@@ -516,7 +786,7 @@ class BudgetServiceTest {
 		}
 
 		@Override
-		public void commit(Reservation reservation, Amount actual) {
+		public Map<BudgetKey, Amount> commit(Reservation reservation, Amount actual) {
 			throw down();
 		}
 
@@ -532,6 +802,30 @@ class BudgetServiceTest {
 
 		private static LedgerUnavailableException down() {
 			return new LedgerUnavailableException("store down", new IllegalStateException("connection refused"));
+		}
+	}
+
+	private static final class RecordingListener implements BudgetListener {
+
+		private final List<DecisionMade> decisions = new ArrayList<>();
+
+		private final List<CallSettled> settled = new ArrayList<>();
+
+		private final List<BudgetThresholdReached> thresholds = new ArrayList<>();
+
+		@Override
+		public void onDecision(DecisionMade event) {
+			this.decisions.add(event);
+		}
+
+		@Override
+		public void onSettled(CallSettled event) {
+			this.settled.add(event);
+		}
+
+		@Override
+		public void onThresholdReached(BudgetThresholdReached event) {
+			this.thresholds.add(event);
 		}
 	}
 }

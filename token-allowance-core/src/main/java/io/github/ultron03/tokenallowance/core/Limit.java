@@ -15,6 +15,9 @@ import org.jspecify.annotations.Nullable;
  */
 public record Limit(Scope scope, Window window, @Nullable Long maxTokens, @Nullable Money maxCost) {
 
+	/** A cap counts as used up at this percent. */
+	public static final int FULL_PERCENT = 100;
+
 	/**
 	 * Validates the fields.
 	 * @throws IllegalArgumentException if neither cap is set, or a set cap is not greater than zero
@@ -50,9 +53,22 @@ public record Limit(Scope scope, Window window, @Nullable Long maxTokens, @Nulla
 
 	/** {@return whether {@code amount} has used up a cap, so no further usage fits} */
 	public boolean isReachedBy(Amount amount) {
-		boolean tokensUsedUp = this.maxTokens != null && amount.tokens() >= this.maxTokens;
-		boolean costUsedUp = this.maxCost != null
-				&& (amount.cost().isGreaterThan(this.maxCost) || amount.cost().equals(this.maxCost));
-		return tokensUsedUp || costUsedUp;
+		return this.reachesPercent(amount, FULL_PERCENT);
+	}
+
+	/**
+	 * {@return whether {@code amount} is at or past {@code percent} of either cap} Compares whole
+	 * numbers ({@code used * 100 >= cap * percent}), so there is no floating-point rounding.
+	 * @throws IllegalArgumentException if {@code percent} is not between 0 and 100
+	 */
+	public boolean reachesPercent(Amount amount, int percent) {
+		if (percent < 0 || percent > FULL_PERCENT) {
+			throw new IllegalArgumentException("percent must be between 0 and " + FULL_PERCENT);
+		}
+		boolean tokensReached = this.maxTokens != null
+				&& Math.multiplyExact(amount.tokens(), FULL_PERCENT) >= Math.multiplyExact(this.maxTokens, percent);
+		boolean costReached = this.maxCost != null && Math.multiplyExact(amount.cost().micros(),
+				FULL_PERCENT) >= Math.multiplyExact(this.maxCost.micros(), percent);
+		return tokensReached || costReached;
 	}
 }

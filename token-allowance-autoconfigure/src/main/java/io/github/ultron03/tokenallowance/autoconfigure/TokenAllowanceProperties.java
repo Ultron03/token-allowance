@@ -15,6 +15,8 @@ import io.github.ultron03.tokenallowance.core.UnknownModelPolicy;
 import io.github.ultron03.tokenallowance.core.Window;
 import io.github.ultron03.tokenallowance.springai.advisor.InterruptedStreamPolicy;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
@@ -34,6 +36,7 @@ import jakarta.validation.constraints.PositiveOrZero;
  * @param stream how interrupted streams are charged
  * @param web the HTTP response for a used-up budget
  * @param store where spend is kept and what happens while it can't be reached
+ * @param thresholds percents of each limit at which a BudgetThresholdReached event is published
  */
 @ConfigurationProperties(TokenAllowanceProperties.PREFIX)
 @Validated
@@ -41,7 +44,8 @@ public record TokenAllowanceProperties(@DefaultValue("true") boolean enabled,
 		@DefaultValue("enforce") EnforcementMode mode, @DefaultValue("UTC") ZoneId zone,
 		@DefaultValue @Valid Subject subject, @DefaultValue @Valid Pricing pricing,
 		@DefaultValue List<@Valid LimitProperties> limits, @DefaultValue @Valid PerRequest perRequest,
-		@DefaultValue Streaming stream, @DefaultValue Web web, @DefaultValue Store store) {
+		@DefaultValue Streaming stream, @DefaultValue Web web, @DefaultValue Store store,
+		@DefaultValue({"80", "100"}) List<@Min(1) @Max(100) Integer> thresholds) {
 
 	/** Prefix of all Token Allowance properties. */
 	public static final String PREFIX = "token-allowance";
@@ -49,6 +53,7 @@ public record TokenAllowanceProperties(@DefaultValue("true") boolean enabled,
 	/** Copies the list, so the bound settings can't change later. */
 	public TokenAllowanceProperties {
 		limits = List.copyOf(limits);
+		thresholds = List.copyOf(thresholds);
 	}
 
 	/**
