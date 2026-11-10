@@ -39,7 +39,7 @@ Reserving before the call means two parallel requests can't both pass a check an
 <dependency>
     <groupId>io.github.ultron03</groupId>
     <artifactId>token-allowance-spring-boot-starter</artifactId>
-    <version>0.3.0</version>
+    <version>0.3.1</version>
 </dependency>
 <dependency>
     <groupId>org.springframework.ai</groupId>
@@ -249,7 +249,7 @@ To keep spend in Redis, so every instance counts against the same budgets, add t
 <dependency>
     <groupId>io.github.ultron03</groupId>
     <artifactId>token-allowance-redis</artifactId>
-    <version>0.3.0</version>
+    <version>0.3.1</version>
 </dependency>
 <dependency>
     <groupId>org.springframework.boot</groupId>
