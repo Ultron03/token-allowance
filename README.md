@@ -1,59 +1,27 @@
 # Token Allowance
 
-
 [![CI](https://github.com/Ultron03/token-allowance/actions/workflows/ci.yml/badge.svg)](https://github.com/Ultron03/token-allowance/actions/workflows/ci.yml)
 [![Maven Central](https://img.shields.io/maven-central/v/io.github.ultron03/token-allowance-spring-boot-starter)](https://central.sonatype.com/artifact/io.github.ultron03/token-allowance-spring-boot-starter)
 [![License](https://img.shields.io/github/license/Ultron03/token-allowance)](LICENSE)
-![Java](https://img.shields.io/badge/Java-17%2B-orange)
 
 A Spring Boot starter that enforces per-user, per-tenant and per-session token and dollar budgets on Spring AI `ChatClient` calls. It also caps runaway tool loops, so one request can't make a hundred model calls.
 
 ![alice gets three answers, then HTTP 429, while bob is still served](https://raw.githubusercontent.com/Ultron03/token-allowance-demo/main/demo/token-allowance.gif)
 
-Try it without an API key: [token-allowance-demo](https://github.com/Ultron03/token-allowance-demo) runs against a local Ollama model.
-
-## Adoption & Distribution
-
-Token Allowance is published on Maven Central
-as a modular set of five artifacts.
-
-### Maven Central Adoption
-
-According to Sonatype Publisher Insights
-(**3-month reporting period, as of November 7, 2026**):
-
-the `io.github.ultron03` namespace recorded
-the following activity over the last three months:
-
-| Metric | Value |
-|---|---:|
-| Downloads | 432 |
-| Unique sources | 49 |
-| Companies | 19 |
-
-### Package Analytics
-
-Package-level analytics are available through Scarf.
-
-The project distributes five Maven artifacts:
-- token-allowance-core
-- token-allowance-spring-ai
-- token-allowance-autoconfigure
-- token-allowance-spring-boot-starter
-- token-allowance-parent
-
-[View Maven Central](https://central.sonatype.com/)
+Try it without an API key: [token-allowance-demo](https://github.com/Ultron03/token-allowance-demo) runs against a local Ollama model, from the terminal or a small web console.
 
 ## Why
 
 An LLM bill grows with every call, and one user, one bug or one tool loop that never ends can run it up overnight. Provider dashboards show the damage the next day. Token Allowance checks the budget before each call and charges the real usage after it, so a used-up budget is answered with `429 Too Many Requests` instead of another paid call.
+
+If you already run an LLM gateway, it can cap spend per API key or per forwarded user id. Token Allowance does it inside the app instead: there is no extra service to run, the user comes from your Spring Security login, and it sees a whole request, so it can stop a tool loop halfway.
 
 ## How it works
 
 Two advisors are added to every `ChatClient.Builder` that Spring AI creates:
 
 - **Admission** runs once per request, before chat memory and tools. It finds who the request is for and denies it if a budget is already used up.
-- **Metering** runs once per model call, including every round of a tool loop. Before the call it reserves an estimate; after the call it replaces the estimate with the usage the provider reported. It also stops a request that reaches its per-request call or cost cap.
+- **Metering** runs once per model call, including every round of a tool loop. It reserves an estimate before the call and replaces it with the provider's reported usage after. It also stops a request that reaches its per-request call or cost cap.
 
 Reserving before the call means two parallel requests can't both pass a check and overspend together.
 
@@ -65,25 +33,25 @@ Reserving before the call means two parallel requests can't both pass a check an
 
 ## Quickstart
 
-**1. Add the starter** next to your Spring AI model starter. The example is a Spring MVC app, so it also uses the web starter:
+**1. Add the starter** next to your Spring AI model starter:
 
 ```xml
 <dependency>
-    <groupId>org.springframework.boot</groupId>
-    <artifactId>spring-boot-starter-webmvc</artifactId>
-</dependency>
-<dependency>
     <groupId>io.github.ultron03</groupId>
     <artifactId>token-allowance-spring-boot-starter</artifactId>
-    <version>0.2.0</version>
+    <version>0.3.0</version>
 </dependency>
 <dependency>
     <groupId>org.springframework.ai</groupId>
     <artifactId>spring-ai-starter-model-openai</artifactId>
 </dependency>
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-webmvc</artifactId>
+</dependency>
 ```
 
-**2. Set prices and budgets** in `application.yml`. Prices are in dollars per million tokens, as on provider pricing pages. The prices below are an example; check your provider's current prices.
+**2. Set prices and budgets** in `application.yml`. Prices are dollars per million tokens, as on provider pricing pages; the ones below are an example.
 
 ```yaml
 token-allowance:
@@ -132,13 +100,7 @@ HTTP/1.1 429 Too Many Requests
 Retry-After: 41520
 Content-Type: application/problem+json
 
-{
-  "type": "about:blank",
-  "title": "Token budget exceeded",
-  "status": 429,
-  "detail": "user daily budget exceeded",
-  "instance": "/chat"
-}
+{ "title": "Token budget exceeded", "status": 429, "detail": "user daily budget exceeded", "instance": "/chat" }
 ```
 
 `Retry-After` is the number of seconds until the budget's window resets.
@@ -149,7 +111,7 @@ Content-Type: application/problem+json
 
 Budgets with scope `user`, `tenant` or `session` need an id. For each scope, the first of these that has one wins:
 
-1. **An advisor param** on the call. This is the only way to pass tenant and session ids, and the only one that works in WebFlux, streams on other threads and background jobs. If you use chat memory, its `ChatMemory.CONVERSATION_ID` param is also the session id, so `session` budgets work per conversation without extra code.
+1. **An advisor param** on the call. This is the only way to pass tenant and session ids, and the only one that works in WebFlux, streams on other threads and background jobs. With chat memory, `ChatMemory.CONVERSATION_ID` also counts as the session id.
 
    ```java
    chatClient.prompt()
@@ -165,9 +127,7 @@ Budgets with scope `user`, `tenant` or `session` need an id. For each scope, the
 
 A request with no id is only checked against `global` budgets.
 
-### Chat without a login
-
-A public chat widget has no user id, so one visitor could use up the global budget for everyone. To give each visitor a budget, use the client's IP address as the user id. Define your own resolver chain with an IP resolver last:
+**Chat without a login.** To give each anonymous visitor a budget, define your own resolver chain with the client's IP address last:
 
 ```java
 @Bean
@@ -183,11 +143,11 @@ SubjectResolver subjectResolver() {
 }
 ```
 
-Behind a load balancer, set `server.forward-headers-strategy: framework` so the address is the client's, not the proxy's, and only if the proxy sets `X-Forwarded-For` itself. Everyone behind one office network shares an address, and so shares a budget.
+Behind a load balancer that sets `X-Forwarded-For`, also set `server.forward-headers-strategy: framework`. Everyone behind one office network then shares a budget.
 
 ## Plans
 
-Users on different plans can get different budgets. `limits` apply to everyone; a plan lists only what differs. A plan's limit replaces the common limit with the same scope and window, and any other plan limit is added:
+`limits` apply to everyone; a plan lists only what differs. A plan limit replaces the common limit with the same scope and window, and any other plan limit is added:
 
 ```yaml
 token-allowance:
@@ -200,18 +160,13 @@ token-allowance:
       - { scope: user, window: minute, max-tokens: 20000 }
 ```
 
-A `pro` user gets $10 a day, at most 20,000 tokens a minute, and shares the global $200. Plans can't set `global` limits, since there is one global budget for everyone.
+A `pro` user gets $10 a day, at most 20,000 tokens a minute, and shares the global $200. Plans can't set `global` limits.
 
-The plan comes from, in this order:
+The plan comes from the `SubjectParams.PLAN` advisor param, or else from a Spring Security authority named `PLAN_<name>` (for example `PLAN_pro`). Never from a header, because a client could claim any plan. A caller with no plan, or an unknown one, gets the common `limits`.
 
-1. **The `SubjectParams.PLAN` advisor param**: `.advisors(a -> a.param(SubjectParams.PLAN, "pro"))`.
-2. **A Spring Security authority** named `PLAN_<name>`, for example `PLAN_pro`, set when the user logs in.
+Spend is counted per user, not per plan: when Alice upgrades after spending $0.80 today, she has $9.20 left, not a fresh $10.
 
-Never from a header, because a client could claim any plan. Plan names match ignoring case. A caller with no plan, or with a plan that isn't configured, gets the common `limits`; an unknown plan is logged once.
-
-Spend is counted per user, not per plan. When Alice upgrades from free to pro after spending $0.80 today, she has $9.20 left, not a fresh $10. To give her a fresh start, [reset her budget](#giving-budget-back).
-
-A login authority is fixed until the user logs in again. If your app changes plans while users are logged in, or keeps a customer's cap in its own database, replace the limits instead:
+If plans change while users are logged in, or caps live in your own database, replace the limits instead:
 
 ```java
 @Bean
@@ -221,8 +176,7 @@ LimitResolver limitResolver(ContractRepository contracts) {
         if (tenantId == null) {
             return List.of();
         }
-        Money monthlyCap = contracts.monthlyCapOf(tenantId);
-        return List.of(new Limit(Scope.TENANT, Window.MONTHLY, null, monthlyCap));
+        return List.of(new Limit(Scope.TENANT, Window.MONTHLY, null, contracts.monthlyCapOf(tenantId)));
     };
 }
 ```
@@ -231,7 +185,7 @@ The resolver is asked before every model call and when the call is charged, so c
 
 ## Per-endpoint request caps
 
-`per-request.max-model-calls` and `per-request.max-cost` apply to every request. An endpoint whose requests need a different cap, such as an agent that walks a tool loop, sets its own on its client:
+`per-request.*` applies to every request. An endpoint that needs a different cap, such as an agent that walks a tool loop, sets its own on its client; anything it doesn't set comes from `per-request`:
 
 ```java
 ChatClient agentClient = chatClientBuilder
@@ -240,40 +194,21 @@ ChatClient agentClient = chatClientBuilder
     .build();
 ```
 
-A cap the endpoint doesn't set comes from `per-request`. The same params work on a single call with `.advisors(..)`.
+## Reading and changing a budget
 
-## Showing users what they have left
-
-`BudgetService.statusOf` returns the caller's current spend for each limit of a scope, the same numbers the [actuator endpoint](#actuator-endpoint) shows. Use it to show a user how much is left and when it resets:
+The `BudgetService` bean shows a subject's spend and lets support give some back:
 
 ```java
-for (BudgetStatus budget : budgetService.statusOf(Scope.USER, userId, plan)) {
-    Money cap = budget.limit().maxCost();
-    if (cap != null) {
-        BigDecimal left = cap.toDollars()
-            .subtract(budget.spend().committed().cost().toDollars())
-            .max(BigDecimal.ZERO);
-        view.addBudget(budget.limit().window(), left, budget.resetsAt());
-    }
-}
-```
-
-`committed` is what finished calls used; admission compares it with the cap. It throws `LedgerUnavailableException` while Redis can't be reached.
-
-## Giving budget back
-
-Support can give back spend that a bug burnt, through the `BudgetService` bean:
-
-```java
+List<BudgetStatus> budgets = budgetService.statusOf(Scope.USER, "alice", plan);
 budgetService.topUp(Scope.USER, "alice", new Amount(0, Money.ofDollars("2.00")));
 budgetService.reset(Scope.USER, "alice");
 ```
 
-`topUp` takes the amount off her committed spend, never below zero; `reset` clears it. Both apply to the current minute, hour, day and month windows, and both work with the in-memory and the Redis store. Calls still running keep their reservations, and a call that finishes while `reset` runs stays charged. Neither has an HTTP endpoint; expose them through your own admin API if you need one.
+Each `BudgetStatus` has the limit, the spend (`committed` by finished calls, `reserved` by running ones) and when the window resets, so you can show users what they have left. `topUp` takes an amount off committed spend, never below zero, and `reset` clears it, in the current minute, hour, day and month windows. Neither has an HTTP endpoint; expose them through your own admin API if you need one.
 
 ## Configuration reference
 
-All properties start with `token-allowance.`. Amounts are in dollars; write them as strings (`"0.50"`) so YAML doesn't turn them into floating-point numbers.
+All properties start with `token-allowance.`. Write amounts as strings (`"0.50"`) so YAML doesn't turn them into floating-point numbers.
 
 | Property | Default | Meaning |
 |---|---|---|
@@ -281,38 +216,38 @@ All properties start with `token-allowance.`. Amounts are in dollars; write them
 | `mode` | `enforce` | `enforce` denies requests over budget; `observe` only logs them. |
 | `zone` | `UTC` | Time zone in which hour, day and month windows start. |
 | `subject.header` | `X-User-Id` | HTTP header with the user id. |
-| `pricing.unknown-model` | `reject` | A model with no price: `reject` fails a call that a cost cap applies to (a `max-cost` limit or a per-request cost cap) and counts the tokens of any other call with no cost, `allow-uncosted` always counts tokens with no cost, `default-price` uses `pricing.default-price`. With only token limits, no prices are needed. |
-| `pricing.default-price.*` | none | Price for unknown models: `input-per-mtok`, `output-per-mtok`, optional `cached-input-per-mtok`, `cache-write-per-mtok`. |
+| `pricing.unknown-model` | `reject` | A model with no price: `reject` fails a call that a cost cap applies to and counts only tokens for the rest, `allow-uncosted` always counts tokens only, `default-price` uses `pricing.default-price`. With only token limits, no prices are needed. |
+| `pricing.default-price.*` | none | Price for unknown models, with the same fields as a model below. |
 | `pricing.models[n].name` | none | Model name, matched ignoring case and a trailing date (`gpt-4o-2024-08-06` uses the `gpt-4o` price). |
 | `pricing.models[n].input-per-mtok` | none | Input price per million tokens. |
 | `pricing.models[n].output-per-mtok` | none | Output price per million tokens. |
 | `pricing.models[n].cached-input-per-mtok` | input price | Price of input tokens read from the provider's cache. |
 | `pricing.models[n].cache-write-per-mtok` | input price | Price of input tokens written to the provider's cache. |
 | `limits[n].scope` | none | `user`, `tenant`, `session` or `global`. |
-| `limits[n].window` | none | `minute`, `hour`, `daily` or `monthly`. Windows are fixed: a minute window resets at :00 seconds. |
+| `limits[n].window` | none | `minute`, `hour`, `daily` or `monthly`. |
 | `limits[n].max-tokens` | none | Most tokens in one window. |
 | `limits[n].max-cost` | none | Most dollars in one window. Each limit needs `max-tokens`, `max-cost` or both. |
-| `plans.<name>[n].*` | none | Limits for callers on plan `<name>`, with the same fields as `limits` (see [Plans](#plans)). |
+| `plans.<name>[n].*` | none | Limits for callers on plan `<name>`, with the same fields as `limits`. |
 | `per-request.max-model-calls` | none | Most model calls one request may make, tool-loop rounds included. |
 | `per-request.max-cost` | none | Most dollars one request may cost. |
-| `estimate.output-tokens` | none | Answer length a call reserves before it is made, never more than the request's max tokens. Unset reserves the request's max tokens, or 1,024 without one. Set it near your typical answer length when users are refused while they still have budget left (see below). |
+| `estimate.output-tokens` | none | Answer length a call reserves before it is made, never more than the request's max tokens. Unset reserves the request's max tokens, or 1,024 without one. |
 | `stream.interrupted` | `charge-estimate` | A stream that stops before the provider reports usage: `charge-estimate` charges the estimate, `release` charges nothing. |
 | `web.exception-handler` | `true` | Answers a used-up budget with 429 and an unreachable budget store with 503. Turn it off to handle `BudgetExceededException` and `LedgerUnavailableException` yourself. |
-| `store.type` | `in-memory` | `in-memory` keeps spend in each instance; `redis` shares it across instances (see below). |
-| `store.failure-mode` | `auto` | What happens to new calls while Redis can't be reached: `fail-open`, `fail-closed`, or `auto` (open in `observe` mode, closed in `enforce` mode). |
-| `thresholds` | `80,100` | Percents of each limit at which a `BudgetThresholdReached` event is published, each from 1 to 100 (see [Alerts](#alerts)). |
+| `store.type` | `in-memory` | `in-memory` keeps spend in each instance; `redis` shares it across instances. |
+| `store.failure-mode` | `auto` | New calls while Redis can't be reached: `fail-open`, `fail-closed`, or `auto` (open in `observe` mode, closed in `enforce` mode). |
+| `thresholds` | `80,100` | Percents of each limit at which a `BudgetThresholdReached` event is published. |
 
 The app fails at startup on an invalid setting, such as a price with more than six decimal places. That is almost always a per-token price where a per-million price was meant.
 
 ## Sharing budgets across instances
 
-Spend can also be kept in Redis, so every instance of your app counts against the same budgets. Add the Redis module and Spring Boot's Redis starter:
+To keep spend in Redis, so every instance counts against the same budgets, add the Redis module and Spring Boot's Redis starter:
 
 ```xml
 <dependency>
     <groupId>io.github.ultron03</groupId>
     <artifactId>token-allowance-redis</artifactId>
-    <version>0.2.0</version>
+    <version>0.3.0</version>
 </dependency>
 <dependency>
     <groupId>org.springframework.boot</groupId>
@@ -321,54 +256,34 @@ Spend can also be kept in Redis, so every instance of your app counts against th
 ```
 
 ```yaml
-spring:
-  data:
-    redis:
-      host: localhost
-      timeout: 500ms     # the default is 60 seconds per command
-token-allowance:
-  store:
-    type: redis
+spring.data.redis:
+  host: localhost
+  timeout: 500ms     # the default is 60 seconds per command
+token-allowance.store.type: redis
 ```
 
 Each reserve and settle is one Lua script, so parallel calls on different instances can't overspend together. All keys share the hash tag `{ta}`, so on Redis Cluster they live on one node.
 
-**When Redis is down.** With `fail-closed`, new calls get `503 Service Unavailable`. With `fail-open`, they go ahead without budget checks, and their spend is not recorded, not even after Redis is back. Calls already running finish either way; their charge is lost and logged. The outage is logged once at WARN when it starts and at INFO when Redis is back.
-
-Set `spring.data.redis.timeout`. Without it, every call waits up to 60 seconds for Redis before the failure mode applies.
-
-With Spring Boot Actuator, Boot's own `redis` health indicator turns `/actuator/health` DOWN while Redis is unreachable, also in `fail-open` mode, where the app still serves calls. The Kubernetes liveness and readiness groups don't include it by default; leave it out of them if you fail open.
+**When Redis is down,** `fail-closed` answers new calls with `503`; `fail-open` lets them through unchecked and their spend is never recorded. The outage is logged once at WARN and its end at INFO. Set `spring.data.redis.timeout`, or every call waits up to 60 seconds before the failure mode applies. Boot's `redis` health indicator turns `/actuator/health` DOWN during an outage, even in `fail-open`; leave it out of your readiness group if you fail open.
 
 ## Metrics
 
-With Spring Boot Actuator, or any other `MeterRegistry` bean, Token Allowance records these meters:
+With Spring Boot Actuator, or any other `MeterRegistry` bean:
 
 | Meter | Type | Tags | What it counts |
 |---|---|---|---|
-| `token.allowance.decisions` | counter | `stage` (`admission`, `request`, `reservation`), `outcome` (`allowed`, `denied`, `observed`, `ledger-unavailable`), `scope` (`user`, `tenant`, `session`, `global`, `none`) | Every admission and reservation, and every time a per-request cap is reached. `observed` means over budget but let through in `observe` mode. `scope` is the budget that ran out. |
+| `token.allowance.decisions` | counter | `stage` (`admission`, `request`, `reservation`), `outcome` (`allowed`, `denied`, `observed`, `ledger-unavailable`), `scope` | Every admission and reservation, and every per-request cap reached. `scope` is the budget that ran out. |
 | `token.allowance.cost` | counter, USD | `model`, `charge` (`usage`, `estimate`) | Cost charged to budgets. `estimate` means the provider reported no usage. |
 | `token.allowance.tokens` | counter | `model`, `charge` | Tokens charged to budgets. |
-| `token.allowance.estimate.ratio` | distribution summary | `model` | Reported tokens divided by the estimate reserved before the call. Above 1 means the estimate was too low. |
+| `token.allowance.estimate.ratio` | distribution summary | `model` | Reported tokens divided by the reserved estimate. Above 1 means the estimate was too low. |
 
-No meter is tagged with a user, tenant or session id. Turn them all off with `management.metrics.enable.token.allowance=false`.
-
-Spring AI already records the tokens each model call used (`gen_ai.client.token.usage`). `token.allowance.tokens` differs in that it counts what was charged, including estimates for calls without reported usage.
-
-To record the same events somewhere else, define a `BudgetListener` bean; it is called after every decision and every charged or released call. For charged and released calls, listening for the `CallSettled` application event is simpler (see [Budget events](#budget-events)).
+No meter is tagged with a user, tenant or session id. Turn them off with `management.metrics.enable.token.allowance=false`.
 
 ## Actuator endpoint
 
-With Spring Boot Actuator, the `tokenallowance` endpoint shows where a subject stands in the current windows. Like most endpoints, it is not exposed until you include it:
+The `tokenallowance` endpoint shows where a subject stands. Expose it like any other endpoint (`management.endpoints.web.exposure.include: health,tokenallowance`) and secure it, since it shows any user's spend.
 
-```yaml
-management:
-  endpoints:
-    web:
-      exposure:
-        include: health,tokenallowance
-```
-
-`GET /actuator/tokenallowance/{scope}/{subjectId}`, for example `/actuator/tokenallowance/user/alice`. Add `?plan=pro` to see the limits of a plan:
+`GET /actuator/tokenallowance/user/alice` (add `?plan=pro` for a plan's limits; any id works for `global`):
 
 ```json
 {
@@ -389,51 +304,26 @@ management:
 }
 ```
 
-There is one entry per limit of the scope, for the plan asked for. A replaced `LimitResolver` is asked for a caller that has only this one id, so a resolver that needs the tenant to find a user's limits can't answer here. `committed` is what finished calls used; `reserved` is what calls still running hold. Costs are in US dollars. For the global budget, use any subject id, for example `/actuator/tokenallowance/global/all`. A scope without limits answers `404`.
-
-The endpoint shows any user's spend to whoever can reach it, so secure it like your other actuator endpoints.
+A scope without limits answers `404`.
 
 ## Budget events
 
-Token Allowance publishes two application events. Both hold subject ids, so don't use them as metric tags.
+Two application events, both holding subject ids (so never use them as metric tags):
 
-### Alerts
-
-When a call takes a subject's committed spend to 80% or 100% of a limit (see `thresholds`), Token Allowance publishes a `BudgetThresholdReached` application event:
-
-```java
-@Component
-class BudgetAlerts {
-
-	@Async
-	@EventListener
-	void onThresholdReached(BudgetThresholdReached event) {
-		if (event.percent() == 100) {
-			// event.key().subjectId() has used up event.limit() until event.resetsAt()
-		}
-	}
-}
-```
-
-Each threshold fires once per subject and window, from the call that crossed it, even with several instances sharing Redis. A call that jumps past several thresholds publishes one event for each, lowest first. Only charged calls count, not calls still in flight. Events are also published in `observe` mode, so `100` shows who would have been denied. While the budget store can't be reached, nothing is recorded and no event is published.
-
-### Audit log
-
-Every model call publishes a `CallSettled` event once it is charged or released:
+- **`BudgetThresholdReached`** when a call takes committed spend to 80% or 100% of a limit (see `thresholds`). It fires once per subject and window, even across instances sharing Redis, and also in `observe` mode, so `100` shows who would have been denied.
+- **`CallSettled`** after every model call is charged or released, with the budgets it counted against, the estimate, the reported usage, the charge and the outcome (`CHARGED`, `ESTIMATE_CHARGED`, `RELEASED`). It never holds prompt or response text. Use it for an audit log.
 
 ```java
 @Async
 @EventListener
-void onCallSettled(CallSettled call) {
-	auditLog.save(call.model(), call.keys(), call.estimate(), call.reported(), call.charged(), call.outcome());
+void onThresholdReached(BudgetThresholdReached event) {
+    if (event.percent() == 100) {
+        alerts.send(event.key().subjectId(), event.limit(), event.resetsAt());
+    }
 }
 ```
 
-`keys` are the budgets the call counted against, with their subject ids. `estimate` is what was reserved before the call, `reported` is the usage the provider reported, and `charged` is what the budgets were charged. `outcome` is `CHARGED` (the reported usage), `ESTIMATE_CHARGED` (the provider reported no usage) or `RELEASED` (the call failed, nothing charged). The event never holds prompt or response text. It is published even while the budget store can't be reached; the charge itself is then lost.
-
-### Listener threads
-
-Event listeners run on the thread of the chat call, after it has been charged. Use `@Async` (with `@EnableAsync`) for anything slow, such as sending an email or writing to a database; `CallSettled` fires on every model call, so this matters most there. An exception from a listener is logged and does not fail the chat call.
+Listeners run on the chat call's thread after the charge, so use `@Async` for anything slow. An exception from a listener is logged and does not fail the call. To record every decision as well, define a `BudgetListener` bean.
 
 ## Replacing parts
 
@@ -441,36 +331,26 @@ Every bean steps aside when your app defines one of the same type:
 
 | Bean | Replace it to |
 |---|---|
-| `TokenEstimator` | Count input tokens exactly with your model's tokenizer, or reserve output your own way (`estimateOutputTokens`). |
+| `TokenEstimator` | Count tokens with your model's tokenizer, or reserve output your own way. |
 | `PriceCatalog` | Load prices from somewhere other than properties. |
-| `LimitResolver` | Read limits from your own store, such as a customer's contract (see [Plans](#plans)). |
-| `UsageLedger` | Store spend somewhere other than memory or Redis. Throw `LedgerUnavailableException` when your store can't be reached, so the failure mode applies. `commit` returns each budget's committed spend after the charge, read in the same atomic step, so budget alerts fire exactly once. `refund` backs `topUp` and `reset`. |
+| `LimitResolver` | Read limits from your own store (see [Plans](#plans)). |
+| `UsageLedger` | Store spend somewhere other than memory or Redis. See its Javadoc for the atomicity contract. |
 | `SubjectResolver` | Find the user, tenant, session or plan your own way. |
 | `Clock` | Control time in tests. |
 
-The builder customizer steps aside only for a bean named `tokenAllowanceChatClientBuilderCustomizer`, so your own `ChatClientBuilderCustomizer` beans work next to it.
-
-A `ChatClient` built by hand with `ChatClient.builder(chatModel)` gets no advisors. Add them yourself:
-
-```java
-ChatClient chatClient = ChatClient.builder(chatModel)
-    .defaultAdvisors(admissionAdvisor, meteringAdvisor)
-    .build();
-```
+Your own `ChatClientBuilderCustomizer` beans work next to ours. A `ChatClient` built by hand with `ChatClient.builder(chatModel)` gets no advisors; add them yourself with `.defaultAdvisors(admissionAdvisor, meteringAdvisor)`.
 
 ## Limitations
 
-- **Costs are estimates, not invoices.** They use the prices you configure and the usage the provider reports. Check them against your provider's bill.
-- **A budget can be exceeded a little.** Each call reserves an estimate first and is charged its real usage afterwards; the call has already happened, so that charge is never refused. With several calls in flight, a budget can go over by the difference between their estimates and their real usage. A request can go over its own `per-request.max-cost` by at most one call.
-- **Windows are fixed, not sliding.** A user can spend a full minute cap at 10:00:59 and another one at 10:01:00, so for a moment twice the cap goes through.
-- **In-memory spend is per instance.** With the default `store.type`, spend is lost on restart and each instance of your app has its own budgets. Use Redis to share them.
-- **A crashed instance leaves its estimates reserved.** If an instance stops between reserving and settling a call, that estimate stays counted in Redis until the budget's window ends.
-- **The pre-call token estimate is approximate.** The default estimator assumes one token per three characters, rounded up. For English and most code this is higher than the real count, which is the safe direction. For Chinese, Japanese and Korean text it can be about three times too low. Tool schemas and images are not counted. The output estimate is the request's max tokens, or 1,024 if none is set. After the call, the provider's token count replaces the estimate; the estimate is charged only when the provider reports no usage.
-- **A user can be refused with budget left.** Before each call the whole estimate must fit in what is left, so with a 1,000-token answer reserved, a user with 800 tokens left is refused even if their answer would have used 100. `estimate.output-tokens` reserves a typical answer instead; a longer answer is still charged in full, so the budget can then go over by the difference.
-- **A denied stream logs an ERROR line.** When a budget denies a streamed call, Spring AI's `MessageAggregator` logs `Aggregation Error` with the `BudgetExceededException`, even when your app handles the exception. The log line comes from Spring AI and can be ignored.
-- **A stream can be subscribed only once.** Spring AI runs its advisor chain once per `stream()` call. Subscribing twice to the same result fails instead of making a second call; call `stream()` again for a new request.
-- **A streamed response that has started can't become a 429.** If a budget runs out during a tool loop after the first chunk was sent, the HTTP status is already fixed, so the error ends the stream instead.
-
+- **Costs are estimates, not invoices.** They use the prices you configure and the usage the provider reports. Check them against your bill.
+- **A budget can be exceeded a little.** A finished call is always charged, so with several calls in flight a budget can go over by the difference between their estimates and their real usage. A request can go over `per-request.max-cost` by at most one call.
+- **A user can be refused with budget left.** The whole estimate must fit in what is left, so with 1,024 output tokens reserved, a user with 800 left is refused even if the answer would use 100. Set `estimate.output-tokens` to a typical answer length.
+- **The input estimate is rough.** One token per three characters: too high for English and code (the safe side), about three times too low for Chinese, Japanese and Korean. Tool schemas and images are not counted. The provider's count replaces it after the call.
+- **Windows are fixed, not sliding.** A user can spend a full minute cap at 10:00:59 and another at 10:01:00.
+- **In-memory spend is per instance** and lost on restart. Use Redis to share it.
+- **A crashed instance leaves its estimates reserved** in Redis until the window ends.
+- **Only `ChatClient` calls are metered.** Calling a `ChatModel` directly skips both advisors.
+- **Streams:** a denied stream makes Spring AI's `MessageAggregator` log an `Aggregation Error` line, which can be ignored; one `stream()` result can be subscribed only once; and a budget that runs out after the first chunk was sent ends the stream instead of becoming a 429.
 
 ## Contributing
 
