@@ -8,7 +8,7 @@ A Spring Boot starter that enforces per-user, per-tenant and per-session token a
 
 ![alice gets three answers, then HTTP 429; bob is still served; carol is on the pro plan but runs into the budget she shares with alice](https://raw.githubusercontent.com/Ultron03/token-allowance-demo/main/demo/agent-and-dollars.gif)
 
-Try it without an API key: [token-allowance-demo](https://github.com/Ultron03/token-allowance-demo) runs from the terminal or a small web console.
+Try [token-allowance-demo](https://github.com/Ultron03/token-allowance-demo) runs from the terminal or a small web console.
 
 ## Why
 
