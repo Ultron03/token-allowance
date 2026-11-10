@@ -598,6 +598,31 @@ class BudgetServiceTest {
 	}
 
 	@Test
+	void keepsBudgetingWhenListenerThrows() {
+		BudgetListener failing = new BudgetListener() {
+			@Override
+			public void onDecision(DecisionMade event) {
+				throw new IllegalStateException("listener bug");
+			}
+
+			@Override
+			public void onSettled(CallSettled event) {
+				throw new IllegalStateException("listener bug");
+			}
+		};
+		BudgetService service = new BudgetService(this.ledger, rejectingCatalog(),
+				new PlanLimits(List.of(USER_DAILY), Map.of()), RequestLimit.NONE, EnforcementMode.ENFORCE,
+				LedgerFailureMode.FAIL_CLOSED, this.clock, ZoneOffset.UTC, List.of(), List.of(failing, this.listener));
+
+		Reservation reservation = reservationOf(service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE));
+		service.settle(ALICE, reservation, MODEL, ESTIMATE);
+
+		assertThat(this.ledger.current(ALICE_TODAY)).isEqualTo(new Spend(ESTIMATE_AMOUNT, Amount.ZERO));
+		assertThat(this.listener.decisions).hasSize(1);
+		assertThat(this.listener.settled).hasSize(1);
+	}
+
+	@Test
 	void notifiesChargedCallWithReportedUsage() {
 		BudgetService service = listened(EnforcementMode.ENFORCE, this.ledger, LedgerFailureMode.FAIL_CLOSED);
 		Reservation reservation = reservationOf(service.reserve(ALICE, RequestLimit.NONE, MODEL, ESTIMATE));

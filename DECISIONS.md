@@ -671,3 +671,91 @@ because one reserved answer cost $0.0005, while real answers cost $0.00004.
 **Consequence**
 - With the setting, a budget can go over by the difference between real and expected answer
   length for each call in flight. Documented under Limitations.
+
+## 30. The user id header is opt-in (2026-11-11)
+
+**Context**
+The `X-User-Id` header was read by default. Without a gateway that sets it, a client could send a
+new id on every request and only global limits applied, or send someone else's id and use up
+their budget. With Spring Security, a logged-out request to an open endpoint fell through to it.
+
+**Decision**
+- `token-allowance.subject.header` has no default; the header resolver is only in the chain when
+  it is set. A set value must be a header name without spaces.
+
+**Consequence**
+- Apps that relied on the header without setting it must add `subject.header: X-User-Id` in
+  0.3.1. Called out in the release notes.
+
+## 31. Tokens only in the total are output (2026-11-11)
+
+**Context**
+Spring AI's Gemini model maps `completionTokens` to `candidatesTokenCount`. Thinking tokens
+(`thoughtsTokenCount`, billed at the output price) and tool-use prompt tokens are only in
+`totalTokens`, so they were never charged.
+
+**Decision**
+- When `totalTokens` is larger than input plus output, the difference is charged as output. No
+  provider type is checked, so the OpenAI-compatible Gemini endpoint is covered too.
+
+**Consequence**
+- Tool-use prompt tokens are priced as output, a little high. Providers whose total is smaller
+  than our input (Anthropic, where we add the cache tokens) are unaffected.
+
+## 32. Timed-out calls follow the interrupted-stream policy (2026-11-11)
+
+**Context**
+A call that threw was always released. A read timeout doesn't mean the provider did no work: it
+may have finished and billed the answer after the client stopped waiting.
+
+**Decision**
+- A failure whose cause chain holds an `InterruptedIOException` or a class named
+  `*TimeoutException` is settled like an interrupted stream: the estimate by default, nothing with
+  `stream.interrupted: release`. A `ConnectException` or `HttpConnectTimeoutException` anywhere in
+  the chain means the request never left, so it is released. The same applies to a stream that
+  times out before its first chunk.
+- Matching by class name covers clients we don't depend on, such as Netty's `ReadTimeoutException`.
+
+**Consequence**
+- A connect timeout reported as a plain `SocketTimeoutException` is charged: the safe side.
+- Retries inside the model client stay invisible; documented under Limitations.
+
+## 33. Reservations time out after an hour (2026-11-11)
+
+**Context**
+A reservation that was never settled (crashed instance, Redis down at settle time, a Redis
+timeout after the script ran) stayed in the reserved counters until the window ended: up to a
+month on a monthly budget, so users were refused with budget left. In memory, it stayed until
+restart and kept its window's counter from being evicted.
+
+**Decision**
+- `UsageLedger.RESERVATION_TIMEOUT` is one hour, longer than any model call should take.
+- Redis: each budget key has a sorted set `{ta}:reservations:...` of `id:tokens:micros` members
+  scored by timeout, with the budget key's expiry. `reserve.lua` first drops timed-out members and
+  takes their amounts off; `settle.lua` takes the estimate off only the keys that still hold the
+  member and charges every key, so a late settle never takes an estimate off twice. The
+  `{ta}:reservation:<id>` key is gone. `RedisUsageLedger` takes a `Clock`; the old constructor
+  uses the system clock.
+- In memory: open reservations carry their timeout and are dropped by the minute eviction.
+
+**Consequence**
+- A call that settles after its reservation was dropped everywhere is not charged.
+- Reservations made by 0.3.0 and still open when 0.3.1 starts keep their estimate until their
+  window ends, as before. Clocks of instances sharing a Redis must roughly agree.
+
+## 34. Failing listeners and the input estimate (2026-11-11)
+
+**Context**
+A `BudgetListener` that threw during `reserve` failed the call after the ledger had reserved, so
+the reservation was never settled; during `settle` the user got an error for a call that was
+charged. The input estimate left out tool definitions, sent with every call, and images.
+
+**Decision**
+- `BudgetService` catches and logs a `RuntimeException` from each listener and goes on with the
+  next one. `ApplicationEventBudgetListener` no longer catches on its own.
+- `PromptText` adds each tool's name, description and input schema. `TokenEstimator` gets
+  `estimateMediaTokens(count)`, a default method reserving `DEFAULT_MEDIA_TOKENS` (1,600, about the
+  largest Anthropic image) per media item.
+
+**Consequence**
+- Long audio or video is still underestimated before the call; the reported usage corrects it.

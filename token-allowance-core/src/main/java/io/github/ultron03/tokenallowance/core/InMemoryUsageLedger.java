@@ -20,7 +20,8 @@ import org.slf4j.LoggerFactory;
  *
  * <p>One lock guards all counters, so a reservation across several keys is atomic. A new window
  * gets a new {@link BudgetKey}, so it starts empty; counters of ended windows are dropped once a
- * minute, unless a reservation on them is still open.
+ * minute, unless a reservation on them is still open. Reservations older than
+ * {@link UsageLedger#RESERVATION_TIMEOUT} are dropped at the same time.
  */
 public class InMemoryUsageLedger implements UsageLedger {
 
@@ -37,7 +38,7 @@ public class InMemoryUsageLedger implements UsageLedger {
 
 	private final Map<BudgetKey, Spend> spendByKey = new HashMap<>();
 
-	private final Map<String, Reservation> openReservations = new HashMap<>();
+	private final Map<String, OpenReservation> openReservations = new HashMap<>();
 
 	private Instant nextEviction;
 
@@ -125,17 +126,19 @@ public class InMemoryUsageLedger implements UsageLedger {
 		for (BudgetKey key : reservation.keys()) {
 			this.spendByKey.put(key, spendOf(key).plusReserved(estimate));
 		}
-		this.openReservations.put(reservation.id(), reservation);
+		this.openReservations.put(reservation.id(),
+				new OpenReservation(reservation, this.clock.instant().plus(RESERVATION_TIMEOUT)));
 		return reservation;
 	}
 
 	private Map<BudgetKey, Amount> settle(Reservation reservation, Amount charged) {
 		Objects.requireNonNull(reservation, "reservation can't be null");
 		synchronized (this.lock) {
-			@Nullable Reservation open = this.openReservations.get(reservation.id());
-			if (open == null) {
+			@Nullable OpenReservation tracked = this.openReservations.get(reservation.id());
+			if (tracked == null) {
 				return Map.of();
 			}
+			Reservation open = tracked.reservation();
 
 			// Compute every counter first, so an overflow leaves the ledger unchanged.
 			Map<BudgetKey, Spend> settled = new HashMap<>();
@@ -163,9 +166,10 @@ public class InMemoryUsageLedger implements UsageLedger {
 			return;
 		}
 
+		dropTimedOutReservations(now);
 		Set<BudgetKey> inUse = new HashSet<>();
-		for (Reservation open : this.openReservations.values()) {
-			inUse.addAll(open.keys());
+		for (OpenReservation open : this.openReservations.values()) {
+			inUse.addAll(open.reservation().keys());
 		}
 		int before = this.spendByKey.size();
 		this.spendByKey.keySet().removeIf(key -> !inUse.contains(key) && hasEnded(key, now));
@@ -173,7 +177,25 @@ public class InMemoryUsageLedger implements UsageLedger {
 		log.debug("Evicted {} budget counters of ended windows", before - this.spendByKey.size());
 	}
 
+	private void dropTimedOutReservations(Instant now) {
+		this.openReservations.values().removeIf(open -> {
+			if (now.isBefore(open.expiresAt())) {
+				return false;
+			}
+			Reservation reservation = open.reservation();
+			for (BudgetKey key : reservation.keys()) {
+				this.spendByKey.put(key, spendOf(key).minusReserved(reservation.amount()));
+			}
+			log.debug("Dropped reservation {}, not settled within {}", reservation.id(), RESERVATION_TIMEOUT);
+			return true;
+		});
+	}
+
 	private boolean hasEnded(BudgetKey key, Instant now) {
 		return !now.isBefore(key.window().endOf(key.windowStart(), this.zone));
+	}
+
+	/** A reservation and when it stops counting against its budgets. */
+	private record OpenReservation(Reservation reservation, Instant expiresAt) {
 	}
 }

@@ -3,6 +3,8 @@ package io.github.ultron03.tokenallowance.springai.advisor;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.net.SocketTimeoutException;
+import java.net.http.HttpConnectTimeoutException;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -17,8 +19,10 @@ import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.content.Media;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.tool.annotation.Tool;
+import org.springframework.util.MimeTypeUtils;
 import reactor.core.publisher.Flux;
 
 import io.github.ultron03.tokenallowance.core.Amount;
@@ -116,6 +120,47 @@ class MeteringAdvisorTest {
 	}
 
 	@Test
+	void chargesEstimateWhenCallTimesOut() {
+		ChatClient client = client(FailingChatModel.timingOut(), service(RequestLimit.NONE, USER_DAILY));
+
+		assertThatThrownBy(() -> client.prompt("hi").call().content()).hasRootCauseInstanceOf(SocketTimeoutException.class);
+
+		assertThat(this.ledger.current(ALICE_TODAY).committed().tokens()).isEqualTo(estimateForHi());
+		assertThat(this.ledger.current(ALICE_TODAY).reserved()).isEqualTo(Amount.ZERO);
+	}
+
+	@Test
+	void chargesEstimateWhenCallTimesOutInProviderSpecificWay() {
+		FailingChatModel model = new FailingChatModel(new ReadTimeoutException(), false);
+		ChatClient client = client(model, service(RequestLimit.NONE, USER_DAILY));
+
+		assertThatThrownBy(() -> client.prompt("hi").call().content()).isInstanceOf(ReadTimeoutException.class);
+
+		assertThat(this.ledger.current(ALICE_TODAY).committed().tokens()).isEqualTo(estimateForHi());
+	}
+
+	@Test
+	void releasesCallThatTimedOutConnecting() {
+		FailingChatModel model = new FailingChatModel(
+				new IllegalStateException("I/O error", new HttpConnectTimeoutException("connect timed out")), false);
+		ChatClient client = client(model, service(RequestLimit.NONE, USER_DAILY));
+
+		assertThatThrownBy(() -> client.prompt("hi").call().content()).isInstanceOf(IllegalStateException.class);
+
+		assertThat(this.ledger.current(ALICE_TODAY)).isEqualTo(new Spend(Amount.ZERO, Amount.ZERO));
+	}
+
+	@Test
+	void releasesTimedOutCallWithReleasePolicy() {
+		ChatClient client = client(FailingChatModel.timingOut(), service(RequestLimit.NONE, USER_DAILY),
+				InterruptedStreamPolicy.RELEASE);
+
+		assertThatThrownBy(() -> client.prompt("hi").call().content()).hasRootCauseInstanceOf(SocketTimeoutException.class);
+
+		assertThat(this.ledger.current(ALICE_TODAY)).isEqualTo(new Spend(Amount.ZERO, Amount.ZERO));
+	}
+
+	@Test
 	void deniesCallWhenEstimateExceedsLimit() {
 		FakeChatModel model = answering();
 		ChatClient client = client(model, service(RequestLimit.NONE, SMALL_USER_DAILY));
@@ -133,6 +178,21 @@ class MeteringAdvisorTest {
 		client.prompt("hi").options(ToolCallingChatOptions.builder().maxTokens(100)).call().content();
 
 		assertThat(model.receivedPrompts()).hasSize(1);
+	}
+
+	@Test
+	void reservesTokensForImages() {
+		FakeChatModel model = answering();
+		ChatClient client = client(model, service(RequestLimit.NONE, SMALL_USER_DAILY));
+		Media image = Media.builder().mimeType(MimeTypeUtils.IMAGE_PNG).data(new byte[] { 1 }).build();
+
+		assertThatThrownBy(() -> client.prompt()
+			.user(user -> user.text("hi").media(image))
+			.options(ToolCallingChatOptions.builder().maxTokens(100))
+			.call()
+			.content()).isInstanceOf(BudgetExceededException.class);
+
+		assertThat(model.receivedPrompts()).isEmpty();
 	}
 
 	@Test
@@ -223,6 +283,17 @@ class MeteringAdvisorTest {
 			.hasMessage(FailingChatModel.MESSAGE);
 
 		assertThat(this.ledger.current(ALICE_TODAY)).isEqualTo(new Spend(Amount.ZERO, Amount.ZERO));
+	}
+
+	@Test
+	void chargesEstimateWhenStreamTimesOutBeforeFirstChunk() {
+		ChatClient client = client(FailingChatModel.timingOut(), service(RequestLimit.NONE, USER_DAILY));
+
+		assertThatThrownBy(() -> client.prompt("hi").stream().chatResponse().blockLast())
+			.hasRootCauseInstanceOf(SocketTimeoutException.class);
+
+		assertThat(this.ledger.current(ALICE_TODAY).committed().tokens()).isEqualTo(estimateForHi());
+		assertThat(this.ledger.current(ALICE_TODAY).reserved()).isEqualTo(Amount.ZERO);
 	}
 
 	@Test
@@ -348,25 +419,38 @@ class MeteringAdvisorTest {
 		return FakeChatModel.replying(ScriptedReply.answer("Hello there.", 5, 3));
 	}
 
-	/** A model whose provider is down: every call throws, and a stream fails before or after its first chunk. */
+	/** A model whose provider fails: every call throws, and a stream fails before or after its first chunk. */
 	private static final class FailingChatModel implements ChatModel {
 
 		static final String MESSAGE = "provider unavailable";
 
+		private final RuntimeException failure;
+
 		private final boolean failAfterFirstChunk;
 
 		FailingChatModel(boolean failAfterFirstChunk) {
+			this(new IllegalStateException(MESSAGE), failAfterFirstChunk);
+		}
+
+		FailingChatModel(RuntimeException failure, boolean failAfterFirstChunk) {
+			this.failure = failure;
 			this.failAfterFirstChunk = failAfterFirstChunk;
+		}
+
+		/** Fails like an HTTP client that gave up waiting for the answer. */
+		static FailingChatModel timingOut() {
+			return new FailingChatModel(new IllegalStateException("I/O error", new SocketTimeoutException("Read timed out")),
+					false);
 		}
 
 		@Override
 		public ChatResponse call(Prompt prompt) {
-			throw new IllegalStateException(MESSAGE);
+			throw this.failure;
 		}
 
 		@Override
 		public Flux<ChatResponse> stream(Prompt prompt) {
-			Flux<ChatResponse> failure = Flux.error(new IllegalStateException(MESSAGE));
+			Flux<ChatResponse> failure = Flux.error(this.failure);
 			if (!this.failAfterFirstChunk) {
 				return failure;
 			}
@@ -378,6 +462,10 @@ class MeteringAdvisorTest {
 		public ChatOptions getOptions() {
 			return ChatOptions.builder().model(FakeChatModel.MODEL_NAME).build();
 		}
+	}
+
+	/** Named like Netty's read timeout, which is not a {@link java.util.concurrent.TimeoutException}. */
+	private static final class ReadTimeoutException extends RuntimeException {
 	}
 
 	/** Tool the fake model asks for in the tool-loop tests. */

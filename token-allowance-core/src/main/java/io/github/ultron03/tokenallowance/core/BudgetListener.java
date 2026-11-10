@@ -2,8 +2,8 @@ package io.github.ultron03.tokenallowance.core;
 
 /**
  * Hears what {@link BudgetService} decided and charged, for metrics or an audit log. Called on the
- * caller's thread after the ledger work is done; an exception thrown here fails the chat request,
- * so listeners must not throw.
+ * caller's thread after the ledger work is done; an exception thrown here is logged at WARN and
+ * doesn't fail the chat request.
  */
 public interface BudgetListener {
 

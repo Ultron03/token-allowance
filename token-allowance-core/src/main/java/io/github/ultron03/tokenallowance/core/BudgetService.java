@@ -16,6 +16,7 @@ import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -464,14 +465,23 @@ public class BudgetService {
 
 	private void notifyDecision(DecisionMade.Stage stage, DecisionMade.Outcome outcome, @Nullable Scope scope) {
 		DecisionMade event = new DecisionMade(stage, outcome, scope);
-		for (BudgetListener listener : this.listeners) {
-			listener.onDecision(event);
-		}
+		notifyListeners(event, listener -> listener.onDecision(event));
 	}
 
 	private void notifySettled(CallSettled settled) {
+		notifyListeners(settled, listener -> listener.onSettled(settled));
+	}
+
+	/** A failing listener is logged, so it can't fail a call or leave a reservation behind. */
+	private void notifyListeners(Object event, Consumer<BudgetListener> notification) {
 		for (BudgetListener listener : this.listeners) {
-			listener.onSettled(settled);
+			try {
+				notification.accept(listener);
+			}
+			catch (RuntimeException ex) {
+				log.warn("Budget listener {} failed on {}", listener.getClass().getName(),
+						event.getClass().getSimpleName(), ex);
+			}
 		}
 	}
 
@@ -507,9 +517,7 @@ public class BudgetService {
 			for (int percent : this.thresholds) {
 				if (!limit.reachesPercent(before, percent) && limit.reachesPercent(after, percent)) {
 					BudgetThresholdReached event = new BudgetThresholdReached(key, limit, percent, after, resetsAt);
-					for (BudgetListener listener : this.listeners) {
-						listener.onThresholdReached(event);
-					}
+					notifyListeners(event, listener -> listener.onThresholdReached(event));
 				}
 			}
 		}

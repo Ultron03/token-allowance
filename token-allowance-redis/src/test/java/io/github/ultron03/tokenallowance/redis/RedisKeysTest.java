@@ -68,7 +68,9 @@ class RedisKeysTest {
 	}
 
 	@Test
-	void buildsReservationKey() {
-		assertThat(RedisKeys.reservation("3f2a")).isEqualTo("{ta}:reservation:3f2a");
+	void buildsReservationsKeyThatNoSubjectCanCollideWith() {
+		BudgetKey key = BudgetKey.of(Scope.USER, "alice", Window.DAILY, NOW, ZoneOffset.UTC);
+
+		assertThat(RedisKeys.reservations(key)).isEqualTo("{ta}:reservations:user:daily:1793404800:alice");
 	}
 }

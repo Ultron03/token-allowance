@@ -21,9 +21,6 @@ final class RedisKeys {
 	/** Grace for minute and hour keys; long enough for any call, short enough that old keys don't pile up. */
 	static final Duration SHORT_WINDOW_GRACE = Duration.ofHours(1);
 
-	/** How long an unsettled reservation is remembered; a later commit or release is ignored. */
-	static final Duration RESERVATION_TTL = Duration.ofDays(1);
-
 	static final String COMMITTED_TOKENS = "committed_tokens";
 
 	static final String COMMITTED_MICROS = "committed_micros";
@@ -43,9 +40,10 @@ final class RedisKeys {
 				String.valueOf(key.windowStart().getEpochSecond()), key.subjectId());
 	}
 
-	/** {@return the key that marks a reservation as not yet settled} */
-	static String reservation(String id) {
-		return String.join(SEPARATOR, PREFIX, "reservation", id);
+	/** {@return the sorted set of a budget's open reservations, scored by when each one times out} */
+	static String reservations(BudgetKey key) {
+		return String.join(SEPARATOR, PREFIX, "reservations", lowerCase(key.scope()), lowerCase(key.window()),
+				String.valueOf(key.windowStart().getEpochSecond()), key.subjectId());
 	}
 
 	/** {@return when a budget key may be deleted: its window's grace after the window ends} */

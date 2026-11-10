@@ -1,5 +1,6 @@
 package io.github.ultron03.tokenallowance.core;
 
+import java.time.Duration;
 import java.util.Map;
 import java.util.Set;
 
@@ -9,10 +10,16 @@ import java.util.Set;
  * <p>Implementations must check and reserve all keys in one atomic step, so two parallel calls
  * can't both pass the check and overspend together.
  *
+ * <p>A reservation not settled within {@link #RESERVATION_TIMEOUT} is dropped, so a call lost to a
+ * crashed instance or an unreachable store doesn't hold budget until its window ends.
+ *
  * <p>Any method may throw {@link LedgerUnavailableException} when the store can't be reached;
  * {@link BudgetService} then applies its {@link LedgerFailureMode}.
  */
 public interface UsageLedger {
+
+	/** How long a reservation counts against its budgets; longer than any model call should take. */
+	Duration RESERVATION_TIMEOUT = Duration.ofHours(1);
 
 	/**
 	 * Reserves {@code estimate} on every key, or on none if any limit would be exceeded.

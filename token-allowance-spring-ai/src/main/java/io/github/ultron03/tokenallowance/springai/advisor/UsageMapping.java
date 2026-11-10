@@ -14,6 +14,9 @@ import io.github.ultron03.tokenallowance.core.TokenUsage;
  * <p>OpenAI-style providers include cached tokens in the prompt tokens. Anthropic does not: its
  * prompt tokens are only those after the last cache breakpoint, so the cache counts are added. Its
  * streams report usage with a different native type, so both types are recognised.
+ *
+ * <p>Tokens counted in the total but in neither part are charged as output. That is how Gemini
+ * reports thinking, which it bills at the output price.
  */
 final class UsageMapping {
 
@@ -38,6 +41,10 @@ final class UsageMapping {
 
 		boolean cacheExcludedFromPrompt = isAnthropic(usage.getNativeUsage()) || cached > prompt;
 		long input = cacheExcludedFromPrompt ? Math.addExact(prompt, cached) : prompt;
+		long uncounted = orZero(usage.getTotalTokens()) - Math.addExact(input, output);
+		if (uncounted > 0) {
+			output = Math.addExact(output, uncounted);
+		}
 		return new TokenUsage(input, output, cacheRead, cacheWrite);
 	}
 

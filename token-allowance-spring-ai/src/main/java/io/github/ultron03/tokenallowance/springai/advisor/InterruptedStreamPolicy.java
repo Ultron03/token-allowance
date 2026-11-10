@@ -2,7 +2,8 @@ package io.github.ultron03.tokenallowance.springai.advisor;
 
 /**
  * What to charge for a stream that is cancelled, or fails after its first chunk, before the provider
- * reported usage. The provider has usually started billing by then, but the real count is unknown.
+ * reported usage, and for a call that timed out waiting for the answer. The provider has usually
+ * started billing by then, but the real count is unknown.
  */
 public enum InterruptedStreamPolicy {
 

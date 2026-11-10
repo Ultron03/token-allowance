@@ -27,6 +27,8 @@ import io.github.ultron03.tokenallowance.springai.BudgetExceededException;
 /**
  * Meters every model call, including each round of the tool loop: checks the per-request caps,
  * reserves an estimate, then charges the reported usage or releases the reservation if the call fails.
+ * A call that timed out waiting for the answer may still be billed, so it follows the
+ * {@link InterruptedStreamPolicy} like an interrupted stream.
  *
  * <p>Needs {@link AdmissionAdvisor} on the same client.
  */
@@ -81,7 +83,12 @@ public class MeteringAdvisor implements CallAdvisor, StreamAdvisor {
 			response = chain.nextCall(request);
 		}
 		catch (Throwable ex) {
-			this.budgetService.release(call.reservation(), call.model());
+			if (ProviderTimeout.isCauseOf(ex)) {
+				chargeInterrupted(call);
+			}
+			else {
+				this.budgetService.release(call.reservation(), call.model());
+			}
 			throw ex;
 		}
 
@@ -92,7 +99,8 @@ public class MeteringAdvisor implements CallAdvisor, StreamAdvisor {
 	/**
 	 * Reserves on subscription, so each subscription is metered as its own model call. On complete,
 	 * charges the usage of the last chunk that reported any, or the estimate. An error before the first
-	 * chunk releases; a cancel, or an error after the first chunk, follows the {@link InterruptedStreamPolicy}.
+	 * chunk releases, unless it is a timeout; a timeout, a cancel, or an error after the first chunk
+	 * follows the {@link InterruptedStreamPolicy}.
 	 */
 	@Override
 	public Flux<ChatClientResponse> adviseStream(ChatClientRequest request, StreamAdvisorChain chain) {
@@ -125,6 +133,14 @@ public class MeteringAdvisor implements CallAdvisor, StreamAdvisor {
 		call.context().addCost(charged.cost());
 	}
 
+	/** Settles a call the provider probably billed but reported no usage for, as the policy says. */
+	private void chargeInterrupted(MeteredCall call) {
+		switch (this.interruptedStreamPolicy) {
+			case CHARGE_ESTIMATE -> charge(call, call.estimate());
+			case RELEASE -> this.budgetService.release(call.reservation(), call.model());
+		}
+	}
+
 	private Reservation reserve(RequestBudgetContext context, String model, TokenUsage estimate) {
 		Decision decision = this.budgetService.reserve(context.caller(), context.endpointLimit(), model, estimate);
 		throwIfDenied(decision);
@@ -135,7 +151,8 @@ public class MeteringAdvisor implements CallAdvisor, StreamAdvisor {
 	}
 
 	private TokenUsage estimateOf(Prompt prompt) {
-		long input = this.tokenEstimator.estimateInputTokens(PromptText.of(prompt));
+		long input = Math.addExact(this.tokenEstimator.estimateInputTokens(PromptText.of(prompt)),
+				this.tokenEstimator.estimateMediaTokens(PromptText.mediaCount(prompt)));
 		@Nullable ChatOptions options = prompt.getOptions();
 		@Nullable Integer maxTokens = (options != null) ? options.getMaxTokens() : null;
 		return new TokenUsage(input, this.tokenEstimator.estimateOutputTokens(maxTokens), 0, 0);
@@ -193,7 +210,7 @@ public class MeteringAdvisor implements CallAdvisor, StreamAdvisor {
 		}
 
 		void onError(Throwable ex) {
-			if (!this.anyChunk.get()) {
+			if (!this.anyChunk.get() && !ProviderTimeout.isCauseOf(ex)) {
 				if (claim()) {
 					MeteringAdvisor.this.budgetService.release(this.call.reservation(), this.call.model());
 				}
@@ -215,10 +232,7 @@ public class MeteringAdvisor implements CallAdvisor, StreamAdvisor {
 				charge(this.call, usage);
 				return;
 			}
-			switch (MeteringAdvisor.this.interruptedStreamPolicy) {
-				case CHARGE_ESTIMATE -> charge(this.call, this.call.estimate());
-				case RELEASE -> MeteringAdvisor.this.budgetService.release(this.call.reservation(), this.call.model());
-			}
+			chargeInterrupted(this.call);
 		}
 
 		/** {@return true for the first caller only, who must then settle the reservation} */

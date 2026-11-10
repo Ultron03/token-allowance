@@ -66,6 +66,8 @@ token-allowance:
     - { scope: global, window: monthly, max-cost: "200.00" }
   per-request:
     max-model-calls: 10
+  subject:
+    header: X-User-Id   # only behind a gateway that sets it; see "Who a request is for"
 ```
 
 **3. Use the `ChatClient.Builder` that Spring AI gives you.** Nothing else changes:
@@ -87,7 +89,7 @@ class ChatController {
 }
 ```
 
-**4. Call it.** Without Spring Security, the user comes from the `X-User-Id` header:
+**4. Call it.** Without Spring Security, the user comes from the `X-User-Id` header turned on above:
 
 ```bash
 curl -X POST localhost:8080/chat -H 'X-User-Id: alice' -d 'Hello'
@@ -123,7 +125,7 @@ Budgets with scope `user`, `tenant` or `session` need an id. For each scope, the
    ```
 
 2. **The Spring Security principal's name**, if Spring Security is on the classpath. Anonymous users get no id.
-3. **The `X-User-Id` header** (configurable). A client can send any value here, so only rely on it behind a gateway that sets it. Values longer than 128 characters are ignored.
+3. **The HTTP header named in `subject.header`**, only when that is set. It is off by default because a client can send any value: without a gateway that sets the header itself, a client can rotate ids to dodge per-user limits, or use up someone else's budget. Values longer than 128 characters are ignored.
 
 A request with no id is only checked against `global` budgets.
 
@@ -215,7 +217,7 @@ All properties start with `token-allowance.`. Write amounts as strings (`"0.50"`
 | `enabled` | `true` | Turns everything off when `false`. |
 | `mode` | `enforce` | `enforce` denies requests over budget; `observe` only logs them. |
 | `zone` | `UTC` | Time zone in which hour, day and month windows start. |
-| `subject.header` | `X-User-Id` | HTTP header with the user id. |
+| `subject.header` | none | HTTP header with the user id, such as `X-User-Id`. Unset, no header is read. |
 | `pricing.unknown-model` | `reject` | A model with no price: `reject` fails a call that a cost cap applies to and counts only tokens for the rest, `allow-uncosted` always counts tokens only, `default-price` uses `pricing.default-price`. With only token limits, no prices are needed. |
 | `pricing.default-price.*` | none | Price for unknown models, with the same fields as a model below. |
 | `pricing.models[n].name` | none | Model name, matched ignoring case and a trailing date (`gpt-4o-2024-08-06` uses the `gpt-4o` price). |
@@ -231,7 +233,7 @@ All properties start with `token-allowance.`. Write amounts as strings (`"0.50"`
 | `per-request.max-model-calls` | none | Most model calls one request may make, tool-loop rounds included. |
 | `per-request.max-cost` | none | Most dollars one request may cost. |
 | `estimate.output-tokens` | none | Answer length a call reserves before it is made, never more than the request's max tokens. Unset reserves the request's max tokens, or 1,024 without one. |
-| `stream.interrupted` | `charge-estimate` | A stream that stops before the provider reports usage: `charge-estimate` charges the estimate, `release` charges nothing. |
+| `stream.interrupted` | `charge-estimate` | A stream that stops before the provider reports usage, or a call that times out waiting for the answer: `charge-estimate` charges the estimate, `release` charges nothing. |
 | `web.exception-handler` | `true` | Answers a used-up budget with 429 and an unreachable budget store with 503. Turn it off to handle `BudgetExceededException` and `LedgerUnavailableException` yourself. |
 | `store.type` | `in-memory` | `in-memory` keeps spend in each instance; `redis` shares it across instances. |
 | `store.failure-mode` | `auto` | New calls while Redis can't be reached: `fail-open`, `fail-closed`, or `auto` (open in `observe` mode, closed in `enforce` mode). |
@@ -323,7 +325,7 @@ void onThresholdReached(BudgetThresholdReached event) {
 }
 ```
 
-Listeners run on the chat call's thread after the charge, so use `@Async` for anything slow. An exception from a listener is logged and does not fail the call. To record every decision as well, define a `BudgetListener` bean.
+Listeners run on the chat call's thread after the charge, so use `@Async` for anything slow. To record every decision as well, define a `BudgetListener` bean. An exception from either kind of listener is logged at WARN and does not fail the call.
 
 ## Replacing parts
 
@@ -343,12 +345,14 @@ Your own `ChatClientBuilderCustomizer` beans work next to ours. A `ChatClient` b
 ## Limitations
 
 - **Costs are estimates, not invoices.** They use the prices you configure and the usage the provider reports. Check them against your bill.
+- **One price per model.** Long-context prices (some models charge more above 200k prompt tokens) are not applied, and a call is priced by the model it asked for, so a router that picks another model, such as `openrouter/auto`, is priced wrong.
 - **A budget can be exceeded a little.** A finished call is always charged, so with several calls in flight a budget can go over by the difference between their estimates and their real usage. A request can go over `per-request.max-cost` by at most one call.
 - **A user can be refused with budget left.** The whole estimate must fit in what is left, so with 1,024 output tokens reserved, a user with 800 left is refused even if the answer would use 100. Set `estimate.output-tokens` to a typical answer length.
-- **The input estimate is rough.** One token per three characters: too high for English and code (the safe side), about three times too low for Chinese, Japanese and Korean. Tool schemas and images are not counted. The provider's count replaces it after the call.
+- **The input estimate is rough.** One token per three characters of messages, tool calls and tool definitions: too high for English and code (the safe side), about three times too low for Chinese, Japanese and Korean. Each image or other media item reserves 1,600 tokens, enough for one large image; long audio or video needs more. The provider's count replaces the estimate after the call.
 - **Windows are fixed, not sliding.** A user can spend a full minute cap at 10:00:59 and another at 10:01:00.
 - **In-memory spend is per instance** and lost on restart. Use Redis to share it.
-- **A crashed instance leaves its estimates reserved** in Redis until the window ends.
+- **A call that never settles keeps its estimate reserved for an hour,** for example on a crashed instance. A call that settles more than an hour after it started may not be charged.
+- **Timeouts and retries are charged as well as they can be.** A call that times out waiting for the answer is charged its estimate, since the provider may have billed it; a timeout while connecting is not. Retries inside the model client, such as the OpenAI client's three by default, are invisible to the advisors: only the last attempt is charged.
 - **Only `ChatClient` calls are metered.** Calling a `ChatModel` directly skips both advisors.
 - **Streams:** a denied stream makes Spring AI's `MessageAggregator` log an `Aggregation Error` line, which can be ignored; one `stream()` result can be subscribed only once; and a budget that runs out after the first chunk was sent ends the stream instead of becoming a 429.
 

@@ -8,6 +8,9 @@ public interface TokenEstimator {
 	/** Output tokens reserved for a request that sets no max tokens. */
 	long DEFAULT_OUTPUT_TOKENS = 1024;
 
+	/** Input tokens reserved per image or other media item: about what the largest image costs on Anthropic. */
+	long DEFAULT_MEDIA_TOKENS = 1600;
+
 	/** {@return the estimated input tokens of {@code text}; should overestimate rather than underestimate} */
 	long estimateInputTokens(String text);
 
@@ -19,5 +22,13 @@ public interface TokenEstimator {
 	 */
 	default long estimateOutputTokens(@Nullable Integer maxTokens) {
 		return (maxTokens != null) ? maxTokens : DEFAULT_OUTPUT_TOKENS;
+	}
+
+	/**
+	 * {@return the input tokens to reserve for the images, audio and other media of a call} By
+	 * default {@link #DEFAULT_MEDIA_TOKENS} each, since their size isn't known before the call.
+	 */
+	default long estimateMediaTokens(int mediaCount) {
+		return Math.multiplyExact(mediaCount, DEFAULT_MEDIA_TOKENS);
 	}
 }

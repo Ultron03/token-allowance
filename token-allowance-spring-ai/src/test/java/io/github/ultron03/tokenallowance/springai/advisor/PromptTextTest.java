@@ -10,6 +10,9 @@ import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.model.tool.ToolCallingChatOptions;
+import org.springframework.ai.tool.ToolCallback;
+import org.springframework.ai.tool.definition.ToolDefinition;
 
 class PromptTextTest {
 
@@ -37,5 +40,29 @@ class PromptTextTest {
 			.build();
 
 		assertThat(PromptText.of(new Prompt(List.of(toolResult)))).isEqualTo("12:00 PM");
+	}
+
+	@Test
+	void includesToolDefinitionsSentWithEveryCall() {
+		ToolDefinition definition = ToolDefinition.builder()
+			.name("currentTime")
+			.description("Returns the current time")
+			.inputSchema("{}")
+			.build();
+		ToolCallback tool = new ToolCallback() {
+			@Override
+			public ToolDefinition getToolDefinition() {
+				return definition;
+			}
+
+			@Override
+			public String call(String toolInput) {
+				return "12:00 PM";
+			}
+		};
+		Prompt prompt = new Prompt(List.of(new UserMessage("hi")),
+				ToolCallingChatOptions.builder().toolCallbacks(tool).build());
+
+		assertThat(PromptText.of(prompt)).isEqualTo("hicurrentTimeReturns the current time{}");
 	}
 }

@@ -41,7 +41,7 @@ class TokenAllowancePropertiesTest {
 		assertThat(properties.enabled()).isTrue();
 		assertThat(properties.mode()).isEqualTo(EnforcementMode.ENFORCE);
 		assertThat(properties.zone()).isEqualTo(ZoneId.of("UTC"));
-		assertThat(properties.subject().header()).isEqualTo("X-User-Id");
+		assertThat(properties.subject().header()).isNull();
 		assertThat(properties.pricing().unknownModel()).isEqualTo(UnknownModelPolicy.REJECT);
 		assertThat(properties.pricing().defaultPrice()).isNull();
 		assertThat(properties.pricing().models()).isEmpty();

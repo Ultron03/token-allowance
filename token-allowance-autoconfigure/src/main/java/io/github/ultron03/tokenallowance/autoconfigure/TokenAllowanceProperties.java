@@ -20,6 +20,7 @@ import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.PositiveOrZero;
 
@@ -65,9 +66,10 @@ public record TokenAllowanceProperties(@DefaultValue("true") boolean enabled,
 	/**
 	 * How a request's user is found when it has no advisor param and no Spring Security principal.
 	 *
-	 * @param header the HTTP header holding the user id; only trust it behind a gateway that sets it
+	 * @param header the HTTP header holding the user id, read only when set; any client can send any
+	 *        value, so set it only behind a gateway that sets the header itself
 	 */
-	public record Subject(@DefaultValue("X-User-Id") @NotBlank String header) {
+	public record Subject(@Nullable @Pattern(regexp = "\\S+") String header) {
 	}
 
 	/**

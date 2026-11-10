@@ -3,6 +3,7 @@ package io.github.ultron03.tokenallowance.redis;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -28,6 +29,7 @@ import io.github.ultron03.tokenallowance.core.Reservation;
 import io.github.ultron03.tokenallowance.core.ReservationResult;
 import io.github.ultron03.tokenallowance.core.Scope;
 import io.github.ultron03.tokenallowance.core.Spend;
+import io.github.ultron03.tokenallowance.core.UsageLedger;
 import io.github.ultron03.tokenallowance.core.Window;
 
 class RedisUsageLedgerTest extends RedisTestSupport {
@@ -246,13 +248,33 @@ class RedisUsageLedgerTest extends RedisTestSupport {
 	}
 
 	@Test
-	void setsExpiryOnBudgetAndReservationKeys() {
-		Reservation reservation = this.ledger.reserveUnchecked(Set.of(this.alice), ESTIMATE);
+	void setsExpiryOnBudgetAndReservationsKeys() {
+		this.ledger.reserveUnchecked(Set.of(this.alice), ESTIMATE);
 
 		assertThat(redisTemplate.getExpire(RedisKeys.budget(this.alice))).isBetween(Duration.ofDays(1).toSeconds(),
 				Duration.ofDays(2).toSeconds());
-		assertThat(redisTemplate.getExpire(RedisKeys.reservation(reservation.id())))
-			.isBetween(RedisKeys.RESERVATION_TTL.toSeconds() - 60, RedisKeys.RESERVATION_TTL.toSeconds());
+		assertThat(redisTemplate.getExpire(RedisKeys.reservations(this.alice)))
+			.isEqualTo(redisTemplate.getExpire(RedisKeys.budget(this.alice)));
+	}
+
+	@Test
+	void dropsReservationNotSettledWithinTimeout() {
+		this.ledger.reserveUnchecked(Set.of(this.alice), ESTIMATE);
+
+		ledgerAfterTimeout().reserveUnchecked(Set.of(this.alice), ACTUAL);
+
+		assertThat(this.ledger.current(this.alice)).isEqualTo(new Spend(Amount.ZERO, ACTUAL));
+	}
+
+	@Test
+	void lateSettleTakesEstimateOnlyOffKeysThatStillHoldIt() {
+		Reservation reservation = this.ledger.reserveUnchecked(Set.of(this.alice, this.global), ESTIMATE);
+		ledgerAfterTimeout().reserveUnchecked(Set.of(this.alice), ACTUAL);
+
+		this.ledger.commit(reservation, ACTUAL);
+
+		assertThat(this.ledger.current(this.alice)).isEqualTo(new Spend(ACTUAL, ACTUAL));
+		assertThat(this.ledger.current(this.global)).isEqualTo(new Spend(ACTUAL, Amount.ZERO));
 	}
 
 	@Test
@@ -336,5 +358,11 @@ class RedisUsageLedgerTest extends RedisTestSupport {
 
 	private static Limit globalTokens(long maxTokens) {
 		return new Limit(Scope.GLOBAL, Window.MONTHLY, maxTokens, null);
+	}
+
+	/** Another instance, one reservation timeout later. */
+	private static RedisUsageLedger ledgerAfterTimeout() {
+		Clock later = Clock.offset(Clock.systemUTC(), UsageLedger.RESERVATION_TIMEOUT.plusSeconds(1));
+		return new RedisUsageLedger(redisTemplate, later, UTC);
 	}
 }

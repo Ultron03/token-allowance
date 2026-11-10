@@ -1,5 +1,7 @@
 package io.github.ultron03.tokenallowance.redis;
 
+import java.time.Clock;
+import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -32,6 +34,9 @@ import io.github.ultron03.tokenallowance.core.UsageLedger;
  * Usage ledger kept in Redis, so every instance of an app shares the same budgets. Each change runs
  * as one Lua script, which Redis executes without any other command in between.
  *
+ * <p>Each budget keeps its open reservations in a sorted set by timeout, so reserving drops the
+ * ones a crashed instance never settled.
+ *
  * <p>A refused connection or a command timeout becomes {@link LedgerUnavailableException}; other
  * Redis errors, such as a failing script, are bugs and pass through unchanged.
  */
@@ -57,11 +62,23 @@ public final class RedisUsageLedger implements UsageLedger {
 
 	private final StringRedisTemplate redis;
 
+	private final Clock clock;
+
 	private final ZoneId zone;
 
-	/** Creates a ledger on the given connection; {@code zone} decides when daily and monthly windows end. */
+	/** Creates a ledger on the given connection that times reservations out by the system clock. */
 	public RedisUsageLedger(StringRedisTemplate redis, ZoneId zone) {
+		this(redis, Clock.systemUTC(), zone);
+	}
+
+	/**
+	 * Creates a ledger on the given connection.
+	 * @param clock tells when a reservation has timed out; instances sharing a Redis need clocks that agree
+	 * @param zone decides when daily and monthly windows end
+	 */
+	public RedisUsageLedger(StringRedisTemplate redis, Clock clock, ZoneId zone) {
 		this.redis = Objects.requireNonNull(redis, "redis can't be null");
+		this.clock = Objects.requireNonNull(clock, "clock can't be null");
 		this.zone = Objects.requireNonNull(zone, "zone can't be null");
 	}
 
@@ -142,17 +159,16 @@ public final class RedisUsageLedger implements UsageLedger {
 
 	/** Runs the reserve script; a key without a limit gets no cap. Returns 0 or the position of the key without room. */
 	private long runReserve(String id, List<BudgetKey> keys, Map<BudgetKey, Limit> limits, Amount estimate) {
-		List<String> redisKeys = new ArrayList<>();
-		redisKeys.add(RedisKeys.reservation(id));
-
+		Instant now = this.clock.instant();
 		List<String> args = new ArrayList<>();
 		args.add(String.valueOf(estimate.tokens()));
 		args.add(String.valueOf(estimate.cost().micros()));
-		args.add(String.valueOf(RedisKeys.RESERVATION_TTL.toSeconds()));
+		args.add(String.valueOf(now.getEpochSecond()));
+		args.add(String.valueOf(now.plus(RESERVATION_TIMEOUT).getEpochSecond()));
+		args.add(id);
 
 		for (BudgetKey key : keys) {
 			Limit limit = limits.get(key);
-			redisKeys.add(RedisKeys.budget(key));
 			args.add(maxTokensOf(limit));
 			args.add(maxMicrosOf(limit));
 			args.add(expiryOf(key));
@@ -160,7 +176,7 @@ public final class RedisUsageLedger implements UsageLedger {
 
 		try {
 			// execute only returns null inside a pipeline or transaction, which this class never opens.
-			return Objects.requireNonNull(this.redis.execute(RESERVE, redisKeys, args.toArray()),
+			return Objects.requireNonNull(this.redis.execute(RESERVE, scriptKeys(keys), args.toArray()),
 					"reserve script returned no result");
 		}
 		catch (DataAccessResourceFailureException | QueryTimeoutException ex) {
@@ -180,32 +196,29 @@ public final class RedisUsageLedger implements UsageLedger {
 	private Map<BudgetKey, Amount> settle(Reservation reservation, Amount charged) {
 		Objects.requireNonNull(reservation, "reservation can't be null");
 
-		// Iterated twice below, so both loops must see the keys in one fixed order.
+		// Iterated more than once below, so every loop must see the keys in one fixed order.
 		List<BudgetKey> budgetKeys = new ArrayList<>(reservation.keys());
-		List<String> keys = new ArrayList<>();
-		keys.add(RedisKeys.reservation(reservation.id()));
+		Amount estimate = reservation.amount();
 
 		List<String> args = new ArrayList<>();
-		args.add(String.valueOf(-reservation.amount().tokens()));
-		args.add(String.valueOf(-reservation.amount().cost().micros()));
+		args.add(reservation.id() + ":" + estimate.tokens() + ":" + estimate.cost().micros());
+		args.add(String.valueOf(-estimate.tokens()));
+		args.add(String.valueOf(-estimate.cost().micros()));
 		args.add(String.valueOf(charged.tokens()));
 		args.add(String.valueOf(charged.cost().micros()));
-
-		// One loop for both lists, so the script finds each key's expiry at the same position.
 		for (BudgetKey key : budgetKeys) {
-			keys.add(RedisKeys.budget(key));
 			args.add(expiryOf(key));
 		}
 
 		@Nullable List<?> committed;
 		try {
-			committed = this.redis.execute(SETTLE, keys, args.toArray());
+			committed = this.redis.execute(SETTLE, scriptKeys(budgetKeys), args.toArray());
 		}
 		catch (DataAccessResourceFailureException | QueryTimeoutException ex) {
 			throw new LedgerUnavailableException(UNAVAILABLE, ex);
 		}
 		if (committed == null || committed.isEmpty()) {
-			log.debug("Reservation {} was already settled or has expired", reservation.id());
+			log.debug("Reservation {} was already settled or has timed out", reservation.id());
 			return Map.of();
 		}
 
@@ -217,6 +230,18 @@ public final class RedisUsageLedger implements UsageLedger {
 			committedByKey.put(budgetKeys.get(i), new Amount(tokens, new Money(micros)));
 		}
 		return Map.copyOf(committedByKey);
+	}
+
+	/** {@return the budget keys, then their sets of open reservations in the same order, as the scripts expect} */
+	private static List<String> scriptKeys(List<BudgetKey> budgetKeys) {
+		List<String> keys = new ArrayList<>();
+		for (BudgetKey key : budgetKeys) {
+			keys.add(RedisKeys.budget(key));
+		}
+		for (BudgetKey key : budgetKeys) {
+			keys.add(RedisKeys.reservations(key));
+		}
+		return keys;
 	}
 
 	private String expiryOf(BudgetKey key) {

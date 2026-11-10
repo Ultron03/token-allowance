@@ -1,7 +1,6 @@
 package io.github.ultron03.tokenallowance.springai.event;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatCode;
 
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -51,14 +50,5 @@ class ApplicationEventBudgetListenerTest {
 		this.listener.onSettled(SETTLED);
 
 		assertThat(this.published).containsExactly(SETTLED);
-	}
-
-	@Test
-	void keepsGoingWhenEventListenerFails() {
-		ApplicationEventBudgetListener failing = new ApplicationEventBudgetListener(event -> {
-			throw new IllegalStateException("mail server down");
-		});
-
-		assertThatCode(() -> failing.onThresholdReached(REACHED)).doesNotThrowAnyException();
 	}
 }

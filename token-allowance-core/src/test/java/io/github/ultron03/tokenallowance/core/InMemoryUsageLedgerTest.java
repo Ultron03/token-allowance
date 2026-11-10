@@ -199,13 +199,25 @@ class InMemoryUsageLedgerTest {
 
 	@Test
 	void keepsEndedWindowWhileReservationIsOpen() {
-		Reservation reservation = reserve(amount(40, "0.40"));
-		this.clock.advance(Duration.ofDays(1));
-		reserveTomorrow();
+		BudgetKey thisMinute = BudgetKey.of(Scope.USER, "alice", Window.MINUTE, START, ZoneOffset.UTC);
+		Reservation reservation = reserveOn(Map.of(thisMinute, new Limit(Scope.USER, Window.MINUTE, 100L, null)),
+				amount(40, "0.40"));
+		this.clock.advance(Duration.ofMinutes(1));
+		reserve(amount(1, "0.01"));
 
 		this.ledger.commit(reservation, amount(30, "0.30"));
 
-		assertThat(this.ledger.current(USER_KEY)).isEqualTo(new Spend(amount(30, "0.30"), Amount.ZERO));
+		assertThat(this.ledger.current(thisMinute)).isEqualTo(new Spend(amount(30, "0.30"), Amount.ZERO));
+	}
+
+	@Test
+	void dropsReservationNotSettledWithinTimeout() {
+		reserve(amount(40, "0.40"));
+		this.clock.advance(UsageLedger.RESERVATION_TIMEOUT);
+
+		reserve(amount(1, "0.01"));
+
+		assertThat(this.ledger.current(USER_KEY)).isEqualTo(new Spend(Amount.ZERO, amount(1, "0.01")));
 	}
 
 	@Test

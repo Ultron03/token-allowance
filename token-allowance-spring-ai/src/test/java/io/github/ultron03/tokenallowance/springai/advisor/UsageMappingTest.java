@@ -57,6 +57,13 @@ class UsageMappingTest {
 	}
 
 	@Test
+	void chargesTokensOnlyInTheTotalAsOutput() {
+		Usage geminiWithThinking = new DefaultUsage(100, 20, 150, null, null, null);
+
+		assertThat(UsageMapping.toTokenUsage(responseWith(geminiWithThinking))).isEqualTo(new TokenUsage(100, 50, 0, 0));
+	}
+
+	@Test
 	void treatsNullCountsAsZero() {
 		Usage usage = new DefaultUsage(null, null, null, null, null, null);
 

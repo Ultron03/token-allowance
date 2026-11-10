@@ -15,7 +15,9 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.ChatClientBuilderCustomizer;
+import org.springframework.ai.chat.client.ChatClientRequest;
 import org.springframework.ai.chat.client.DefaultChatClient.DefaultChatClientRequestSpec;
+import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.boot.actuate.autoconfigure.endpoint.EndpointAutoConfiguration;
 import org.springframework.boot.actuate.autoconfigure.endpoint.web.WebEndpointAutoConfiguration;
 import org.springframework.boot.actuate.endpoint.EndpointId;
@@ -32,6 +34,9 @@ import org.springframework.boot.test.context.runner.WebApplicationContextRunner;
 import org.springframework.context.event.EventListener;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 
 import io.github.ultron03.tokenallowance.core.Amount;
 import io.github.ultron03.tokenallowance.core.BudgetKey;
@@ -276,6 +281,18 @@ class TokenAllowanceAutoConfigurationTest {
 	}
 
 	@Test
+	void ignoresUserIdHeaderUnlessConfigured() {
+		runner.run(context -> assertThat(resolveWithHeader(context.getBean(SubjectResolver.class))).isEmpty());
+	}
+
+	@Test
+	void readsUserIdFromConfiguredHeader() {
+		runner.withPropertyValues("token-allowance.subject.header=X-User-Id")
+			.run(context -> assertThat(resolveWithHeader(context.getBean(SubjectResolver.class)))
+				.containsExactly(Map.entry(Scope.USER, "alice")));
+	}
+
+	@Test
 	void startsWithoutServletApi() {
 		runner.withClassLoader(new FilteredClassLoader(HttpServletRequest.class)).run(context -> {
 			assertThat(context).hasNotFailed();
@@ -444,6 +461,19 @@ class TokenAllowanceAutoConfigurationTest {
 				assertThat(context).hasFailed();
 				assertThat(context.getStartupFailure()).hasRootCauseInstanceOf(BindValidationException.class);
 			});
+	}
+
+	/** Resolves a chat request sent with {@code X-User-Id: alice}. */
+	private static Map<Scope, String> resolveWithHeader(SubjectResolver resolver) {
+		MockHttpServletRequest httpRequest = new MockHttpServletRequest();
+		httpRequest.addHeader("X-User-Id", "alice");
+		RequestContextHolder.setRequestAttributes(new ServletRequestAttributes(httpRequest));
+		try {
+			return resolver.resolve(ChatClientRequest.builder().prompt(new Prompt("hi")).build());
+		}
+		finally {
+			RequestContextHolder.resetRequestAttributes();
+		}
 	}
 
 	private static void chargeAlice(BudgetService service, long inputTokens) {

@@ -126,7 +126,7 @@ public class TokenAllowanceAutoConfiguration {
 
 	/**
 	 * Finds the subject from the advisor param, then Spring Security, then the HTTP header. Security
-	 * and the header are only asked when their classes are present.
+	 * is only asked when its classes are present, the header only when {@code subject.header} is set.
 	 */
 	@Bean
 	@ConditionalOnMissingBean
@@ -137,9 +137,10 @@ public class TokenAllowanceAutoConfiguration {
 		if (ClassUtils.isPresent(SPRING_SECURITY_CLASS, classLoader)) {
 			resolvers.add(new SpringSecuritySubjectResolver());
 		}
-		if (ClassUtils.isPresent(REQUEST_CONTEXT_CLASS, classLoader)
+		@Nullable String header = properties.subject().header();
+		if (header != null && ClassUtils.isPresent(REQUEST_CONTEXT_CLASS, classLoader)
 				&& ClassUtils.isPresent(SERVLET_REQUEST_CLASS, classLoader)) {
-			resolvers.add(new HeaderSubjectResolver(properties.subject().header()));
+			resolvers.add(new HeaderSubjectResolver(header));
 		}
 		return new CompositeSubjectResolver(resolvers);
 	}
@@ -185,8 +186,8 @@ public class TokenAllowanceAutoConfiguration {
 		/** Spend kept in Redis, shared by every instance of the app. */
 		@Bean
 		@ConditionalOnMissingBean
-		UsageLedger redisUsageLedger(StringRedisTemplate redis, TokenAllowanceProperties properties) {
-			return new RedisUsageLedger(redis, properties.zone());
+		UsageLedger redisUsageLedger(StringRedisTemplate redis, Clock clock, TokenAllowanceProperties properties) {
+			return new RedisUsageLedger(redis, clock, properties.zone());
 		}
 	}
 
