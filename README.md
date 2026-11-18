@@ -51,7 +51,7 @@ Reserving before the call means two parallel requests can't both pass a check an
 </dependency>
 ```
 
-**2. Set prices and budgets** in `application.yml`. Prices are dollars per million tokens, as on provider pricing pages; the ones below are an example.
+**2. Set prices and budgets** in `application.yml`. Token Allowance ships no prices: copy them from your provider's pricing page ([OpenAI](https://developers.openai.com/api/docs/pricing), [Anthropic](https://platform.claude.com/docs/en/about-claude/pricing), [Google](https://aistudio.google.com/docs/pricing)) and update them when the provider changes them. They are dollars per million tokens, the unit those pages use. With only token limits, no prices are needed.
 
 ```yaml
 token-allowance:
@@ -354,6 +354,7 @@ Your own `ChatClientBuilderCustomizer` beans work next to ours. A `ChatClient` b
 - **A call that never settles keeps its estimate reserved for an hour,** for example on a crashed instance. A call that settles more than an hour after it started may not be charged.
 - **Timeouts and retries are charged as well as they can be.** A call that times out waiting for the answer is charged its estimate, since the provider may have billed it; a timeout while connecting is not. Retries inside the model client, such as the OpenAI client's three by default, are invisible to the advisors: only the last attempt is charged.
 - **Only `ChatClient` calls are metered.** Calling a `ChatModel` directly skips both advisors.
+- **Anthropic streams on Spring AI 2.0 can miss cache tokens.** Spring AI 2.0 reads the cache counts from the last stream event, which may leave them out, and then only the uncached input is charged. Spring AI 2.1 keeps them.
 - **Streams:** a denied stream makes Spring AI's `MessageAggregator` log an `Aggregation Error` line, which can be ignored; one `stream()` result can be subscribed only once; and a budget that runs out after the first chunk was sent ends the stream instead of becoming a 429.
 
 ## Contributing

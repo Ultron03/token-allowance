@@ -11,18 +11,22 @@ import io.github.ultron03.tokenallowance.core.TokenUsage;
 /**
  * Turns Spring AI's {@link Usage} into a {@link TokenUsage} whose input counts all input tokens.
  *
- * <p>OpenAI-style providers include cached tokens in the prompt tokens. Anthropic does not: its
- * prompt tokens are only those after the last cache breakpoint, so the cache counts are added. Its
- * streams report usage with a different native type, so both types are recognised.
+ * <p>OpenAI-style providers include cached tokens in the prompt tokens. Anthropic and Bedrock
+ * report input without them, and Spring AI passes that on as the prompt tokens before 2.1.0-RC2 and
+ * adds the cache counts to it from then on. So for those two the input is rebuilt from the
+ * provider's own count when the response carries it. An Anthropic stream delta without it carries no
+ * cache counts on the older versions, so there the prompt tokens are already the whole input.
  *
  * <p>Tokens counted in the total but in neither part are charged as output. That is how Gemini
  * reports thinking, which it bills at the output price.
  */
 final class UsageMapping {
 
-	/** Anthropic's native usage types, matched by name so the SDK is not needed at runtime. */
-	static final Set<String> ANTHROPIC_USAGE_CLASSES = Set.of("com.anthropic.models.messages.Usage",
+	/** Native usage types, matched by name so their SDKs are not needed at runtime. */
+	private static final Set<String> ANTHROPIC_USAGE_CLASSES = Set.of("com.anthropic.models.messages.Usage",
 			"com.anthropic.models.messages.MessageDeltaUsage");
+
+	private static final String BEDROCK_USAGE_CLASS = "software.amazon.awssdk.services.bedrockruntime.model.TokenUsage";
 
 	private UsageMapping() {
 	}
@@ -39,8 +43,7 @@ final class UsageMapping {
 		long cacheWrite = orZero(usage.getCacheWriteInputTokens());
 		long cached = Math.addExact(cacheRead, cacheWrite);
 
-		boolean cacheExcludedFromPrompt = isAnthropic(usage.getNativeUsage()) || cached > prompt;
-		long input = cacheExcludedFromPrompt ? Math.addExact(prompt, cached) : prompt;
+		long input = inputTokens(usage.getNativeUsage(), prompt, cached);
 		long uncounted = orZero(usage.getTotalTokens()) - Math.addExact(input, output);
 		if (uncounted > 0) {
 			output = Math.addExact(output, uncounted);
@@ -48,8 +51,23 @@ final class UsageMapping {
 		return new TokenUsage(input, output, cacheRead, cacheWrite);
 	}
 
-	private static boolean isAnthropic(@Nullable Object nativeUsage) {
-		return nativeUsage != null && ANTHROPIC_USAGE_CLASSES.contains(nativeUsage.getClass().getName());
+	private static long inputTokens(@Nullable Object nativeUsage, long prompt, long cached) {
+		Long uncached = (nativeUsage != null) ? uncachedInputTokens(nativeUsage) : null;
+		if (uncached != null) {
+			return Math.addExact(uncached, cached);
+		}
+		return (cached > prompt) ? Math.addExact(prompt, cached) : prompt;
+	}
+
+	private static @Nullable Long uncachedInputTokens(Object nativeUsage) {
+		String type = nativeUsage.getClass().getName();
+		if (ANTHROPIC_USAGE_CLASSES.contains(type)) {
+			return AnthropicUsage.uncachedInputTokens(nativeUsage);
+		}
+		if (BEDROCK_USAGE_CLASS.equals(type)) {
+			return BedrockUsage.uncachedInputTokens(nativeUsage);
+		}
+		return null;
 	}
 
 	private static long orZero(@Nullable Number count) {

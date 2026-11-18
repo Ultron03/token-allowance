@@ -759,3 +759,29 @@ charged. The input estimate left out tool definitions, sent with every call, and
 
 **Consequence**
 - Long audio or video is still underestimated before the call; the reported usage corrects it.
+
+## 35. Input tokens from the provider's own count (2026-11-18)
+
+**Context**
+Anthropic and Bedrock report input tokens without cache reads and writes. Spring AI 2.0 passes that
+count on as the prompt tokens, so `UsageMapping` added the cache counts for Anthropic. From 2.1.0-RC2
+Spring AI adds them itself, on both call and stream, so adding them again charged cached tokens
+twice. Bedrock was never handled, so on 2.0 its cache hits were undercharged. On streams the native
+usage is the last `message_delta`, which often carries only `output_tokens`; the cache counts on
+`Usage` are the ones Spring AI keeps from `message_start` (2.1) or reads from that delta (2.0).
+
+**Decision**
+- When the native usage carries the provider's own input count (Anthropic `input_tokens`, Bedrock
+  `inputTokens`), input is that count plus the cache counts from `Usage`, whatever the prompt
+  tokens say. Without it the prompt tokens are used as before.
+- No Spring AI version check: the version can differ from the BOM's, and the native count gives the
+  same answer on both shapes.
+- `AnthropicUsage` and `BedrockUsage` read the SDK types; `UsageMapping` calls them only after the
+  class name matched, so neither SDK is needed at runtime. Both modules are optional dependencies.
+- CI also runs the build against the oldest supported Spring AI (2.0.0) and the newest one on
+  Maven Central, looked up on each run, and runs every Monday so a new release shows up without a
+  push. Versions in between are not tested.
+
+**Consequence**
+- On Spring AI 2.0, an Anthropic stream whose last delta leaves out the cache counts charges only
+  the uncached input; Spring AI 2.1 keeps them.

@@ -39,5 +39,5 @@ JUnit 5 and AssertJ. Name a test after the behaviour it checks, for example `den
 
 - One change per pull request, with tests.
 - `./mvnw verify` passes.
-- If the change affects users, update the README.
+- If the change affects users, update the README and add a line to the top section of `CHANGELOG.md`.
 - By contributing, you agree that your contribution is licensed under the Apache License 2.0.

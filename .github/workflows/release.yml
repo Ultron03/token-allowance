@@ -6,7 +6,7 @@ on:
       - "v*"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   publish:
@@ -31,6 +31,14 @@ jobs:
             exit 1
           fi
 
+      - name: Check that the changelog has this version
+        run: |
+          awk -v heading="## ${GITHUB_REF_NAME#v} " 'index($0, heading) == 1 {found = 1; next} found && /^## / {exit} found' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::error::CHANGELOG.md has no section for ${GITHUB_REF_NAME#v}"
+            exit 1
+          fi
+
       - name: Build, sign and upload to Maven Central
         run: ./mvnw -B -ntp deploy -Prelease -Dgpg.signer=bc
         env:
@@ -38,3 +46,9 @@ jobs:
           MAVEN_CENTRAL_PASSWORD: ${{ secrets.CENTRAL_TOKEN_PASSWORD }}
           MAVEN_GPG_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+
+      # A draft, published by hand together with the Maven Central deployment.
+      - name: Create a draft GitHub release
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "${GITHUB_REF_NAME#v}" --notes-file release-notes.md
+        env:
+          GH_TOKEN: ${{ github.token }}
