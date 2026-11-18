@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.2 (unreleased)
+## 0.3.2 (2026-11-18)
 
 - Fixed: with Spring AI 2.1.0-RC2 or later, Anthropic calls that used prompt caching charged the cached input tokens twice.
 - Fixed: Bedrock Converse calls that used prompt caching were undercharged, because cache reads and writes were not counted as input.
